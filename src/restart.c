@@ -1,13 +1,10 @@
 /* restart.c */
 #define _XOPEN_SOURCE
-#define CKPT_RESTART 1
 #include <stdlib.h>
 #include <stdio.h>
 #include <err.h>
 #include <fcntl.h>
-#include <dlfcn.h>
 #include <ucontext.h>
-#include <signal.h>
 #include "readckpt.h"
 #include "ckpt.h"
 #include "types.h"

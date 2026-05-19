@@ -226,14 +226,20 @@ void printckpt(int fd)
         print_callframes(frames, meta.nr_callframes);
 }
 
+void usage()
+{
+        fprintf(stderr, "USAGE: ./printckpt <file>\n");
+        exit(EXIT_FAILURE);
+}
+
 int main(int argc, char **argv)
 {
         int fd;
 
-        if (argc < 2) {
-                fprintf(stderr, "Usage: ./ckpt -p [ckpt-file]\n");
-                exit(EXIT_FAILURE);
-        } else if ((fd = open(argv[1], O_RDONLY)) < 0)
+        if (argc < 2)
+                usage();
+        
+        if ((fd = open(argv[1], O_RDONLY)) < 0)
                 err(EXIT_FAILURE, "open (%s)", argv[1]);
 
         printckpt(fd);

@@ -1,5 +1,6 @@
+ARCH    ?= arm64
 CC      := clang
-CFLAGS  := -Wall -Wno-deprecated-declarations -g3 -O0 # -arch arm64e
+CFLAGS  := -Wall -Wno-deprecated-declarations -g3 -O0 -arch $(ARCH)
 
 SRC     := ./src
 TEST    := ./test
@@ -12,13 +13,13 @@ LIBCKPT_SOURCES := $(SRC)/libckpt.c $(SRC)/pac.c $(SRC)/vm_region.c \
 RESTART_SOURCES := $(SRC)/restart.c $(SRC)/pac.c $(SRC)/vm_region.c \
                    $(SRC)/readckpt.c
 
-BINARIES        := ckpt printckpt rand count pid
+BINARIES        := ckpt printckpt rand count
 ALL             := $(BINARIES) restart libckpt.dylib
 
 build: $(ALL)
 
 libckpt.dylib: $(LIBCKPT_SOURCES)
-	$(CC) $(CFLAGS) -arch arm64e -I$(INCLUDE) -dynamiclib -fPIC -o $@ $^
+	$(CC) $(CFLAGS) -I$(INCLUDE) -dynamiclib -fPIC -o $@ $^
 
 TEXT_ADDR := 0x300000000
 DATA_ADDR := 0x300004000
