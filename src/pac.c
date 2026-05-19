@@ -1,5 +1,6 @@
 /* pac.c */
 #define _XOPEN_SOURCE
+#include <stdlib.h>
 #include <stdio.h>
 #include <err.h>
 #include <ucontext.h>
@@ -32,10 +33,12 @@ void pac_patch_ucontext(ucontext_t *ucp)
         PACIA(lr, LR_DISCRIMINATOR);
         set_ucontext_lr(ucp, lr);
         set_ucontext_flags(ucp, 0);
-
+        
+        XPACD(fp);
         PACDA(fp, FP_DISCRIMINATOR);
         set_ucontext_fp(ucp, fp);
-
+        
+        XPACD(sp);
         PACDA(sp, SP_DISCRIMINATOR);
         set_ucontext_sp(ucp, sp);
 
@@ -93,9 +96,8 @@ int pac_strip_context(ckpt_context_t *ctx)
                         ctx->modifiers[ARM64_LR] = LR_DISCRIMINATOR;
                 else {
                         fprintf(stderr,
-                                "%s: Failed to identify modifier used "
-                                "to sign link register (lr=0x%llx)\n",
-                                __FILE__, old);
+                                "Failed to identify modifier used to "
+                                "sign link register (lr=0x%llx)\n", old);
                         return -1;
                 }
         }
@@ -259,4 +261,48 @@ void pac_sign_frames(const ckpt_callframe_t *frames,
                 cf++;
                 nr_signed++;
         }
+}
+
+void pac_check()
+{
+        int     fail = 0;
+        u64     check, mod = 0ull;
+        
+        check = ((u64)rand() << 16u) % UINT64_MAX;
+        check &= ~PAC_BIT_MASK;
+
+        PACIB(check, mod);
+        if (PTRAUTH_SIGNED(check)) {
+                AUTIB(check, mod);
+        } else {
+                fprintf(stderr, "pacib noop\n");
+                fail = 1;
+        }
+        
+        PACIA(check, mod);
+        if (PTRAUTH_SIGNED(check)) {
+                AUTIA(check, mod);
+        } else {
+                fprintf(stderr, "pacia noop\n");
+                fail = 1;
+        }
+
+        PACDB(check, mod);
+        if (PTRAUTH_SIGNED(check)) {
+                AUTDB(check, mod);
+        } else {
+                fprintf(stderr, "pacdb noop\n");
+                fail = 1;
+        }
+
+        PACDA(check, mod);
+        if (PTRAUTH_SIGNED(check)) {
+                AUTDA(check, mod);
+        } else {
+                fprintf(stderr, "pacda, noop\n");
+                fail = 1;
+        }
+
+        if (fail)
+                __builtin_trap();
 }

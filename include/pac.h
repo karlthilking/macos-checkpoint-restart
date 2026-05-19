@@ -354,4 +354,6 @@ u32 pac_strip_frames(ckpt_callframe_t *, u64 *);
 /* Re-sign link registers in live stack frame records */
 void pac_sign_frames(const ckpt_callframe_t *, u64 *, const u32);
 
+void pac_check();
+
 #endif // __CKPT_PAC_H__

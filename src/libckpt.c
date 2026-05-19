@@ -31,7 +31,8 @@ void ckpt_handler(int sig, siginfo_t *_, void *uctx)
         
         if (getcontext(&uc) < 0)
                 err(EXIT_FAILURE, "%s: getcontext", __FILE__);
-        else if (restart) {
+        
+        if (restart) {
                 restart         = 0;
                 ucontext_t *ucp = (ucontext_t *)uctx;
                 
@@ -100,13 +101,17 @@ void ckpt_handler(int sig, siginfo_t *_, void *uctx)
 __attribute__((constructor))
 void setup()
 {
-        static struct sigaction sa;
+        struct sigaction sa;
 
         /* Register ckpt_handler to run on SIGUSR2 */
         sigemptyset(&sa.sa_mask);
         sa.sa_flags     = SA_SIGINFO | SA_RESTART;
         sa.sa_sigaction = ckpt_handler;
         sigaction(SIGUSR2, &sa, NULL);
+
+#if defined(__arm64e__)
+        pac_check();
+#endif
 }
 
 __attribute__((destructor))

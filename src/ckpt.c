@@ -16,28 +16,21 @@
 __attribute__((noreturn))
 void print(char *ckptfile)
 {
-        if (execl("./printckpt", "./printckpt", ckptfile, NULL) < 0) {
-                fprintf(stderr, "%s: execl: %s\n", 
-                        __FILE__, strerror(errno));
-        }
-        
+        if (execl("./printckpt", "./printckpt", ckptfile, NULL) < 0)
+                perror("execl");
+
         exit(EXIT_FAILURE);
 }
 
 __attribute__((noreturn))
 void checkpoint(char **args)
 {
-        if (putenv("DYLD_INSERT_LIBRARIES=./libckpt.dylib") < 0) {
-                fprintf(stderr, "%s: execl: %s\n",
-                        __FILE__, strerror(errno));
-                exit(EXIT_FAILURE);
-        }
-                
+        if (setenv("DYLD_INSERT_LIBRARIES", "./libckpt.dylib", 1) < 0)
+                err(EXIT_FAILURE, "setenv");
+
         printf("Executing %s (pid=%d)\n", args[0], getpid());
-        if (execvp(args[0], args) < 0) {
-                fprintf(stderr, "%s: execvp: %s\n",
-                        __FILE__, strerror(errno));
-        }
+        if (execvp(args[0], args) < 0)
+                perror("execvp");
         
         exit(EXIT_FAILURE);
 }
@@ -65,10 +58,8 @@ void restart(char *ckptfile)
         
         retval = posix_spawn(&pid, "./restart", NULL,
                              &attr, args, environ);
-        if (retval < 0) {
-                fprintf(stderr, "%s: posix_spawn: %s\n",
-                        __FILE__, strerror(errno));
-        }
+        if (retval < 0)
+                perror("posix_spawn");
 
         posix_spawnattr_destroy(&attr);
         exit(EXIT_FAILURE);
