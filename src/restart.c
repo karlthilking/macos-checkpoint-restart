@@ -10,7 +10,6 @@
 #include <signal.h>
 #include "readckpt.h"
 #include "ckpt.h"
-#include "shc.h"
 #include "types.h"
 #include "pac.h"
 #include "vm_region.h"

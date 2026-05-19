@@ -7,7 +7,7 @@ INCLUDE := ./include
 
 LIBCKPT_SOURCES := $(SRC)/libckpt.c $(SRC)/pac.c $(SRC)/vm_region.c \
                    $(SRC)/writeckpt.c $(SRC)/time_wrappers.c \
-                   $(SRC)/readckpt.c $(SRC)/pid_wrappers.c
+                   $(SRC)/readckpt.c
 
 RESTART_SOURCES := $(SRC)/restart.c $(SRC)/pac.c $(SRC)/vm_region.c \
                    $(SRC)/readckpt.c

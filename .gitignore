@@ -2,6 +2,7 @@
 *.dylib
 *.o
 *.dSYM
+*.dat
 tmp/
 test/
 build/
