@@ -284,15 +284,23 @@ typedef struct ckpt_callframe {
         for (; __fp != NULL; __fp = (u64 *)__fp[0])
 
 #define for_each_signed_frame(__fp) \
-        for (; __fp != NULL; __fp = next_signed_frame(__fp))
+        for (__fp = first_signed_frame(__fp); __fp != NULL; \
+             __fp = next_signed_frame(__fp))
+
+static inline u64 *first_signed_frame(u64 *fp)
+{
+        for (; fp != NULL; fp = (u64 *)fp[0]) {
+                if (PTRAUTH_SIGNED(fp[1]))
+                        return fp;
+        }
+
+        return NULL;
+}
 
 static inline u64 *next_signed_frame(u64 *fp)
 {
-        u64 __lr;
-        
         for (fp = (u64 *)fp[0]; fp != NULL; fp = (u64 *)fp[0]) {
-                __lr = fp[1];
-                if (PTRAUTH_SIGNED(__lr))
+                if (PTRAUTH_SIGNED(fp[1]))
                         return fp;
         }
 
@@ -309,7 +317,7 @@ static inline u64 *next_signed_frame(u64 *fp)
  * @modifiers:  Modifier values for pointers which were signed
  * @bitmap:     Bitmap marking which pointers were signed
  *
- * ****** TO-DO ******
+* ****** TO-DO ******
  *  - Only certain registers are saved during getcontext() so it is not
  *    necessary to make space for 33 possible modifiers
  */

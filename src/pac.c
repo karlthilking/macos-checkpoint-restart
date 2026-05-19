@@ -186,6 +186,8 @@ u32 pac_strip_frames(ckpt_callframe_t *frames, u64 *fp)
                 prev_fp = fp[0];
                 lr      = fp + 1;
                 sp      = (u64)fp + 0x10;
+
+                assert(PTRAUTH_SIGNED(*lr));
                 
                 old     = *lr;
                 check   = *lr;
