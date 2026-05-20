@@ -10,38 +10,38 @@ extern void (*__cleanup)(void);
 
 void __exit(int status)
 {
-        u64 raw, mod;
-        
         if (PTRAUTH_SIGNED((u64)__cleanup)) {
                 /**
-                 * If __cleanup function pointer is signed, then
-                 * it was possibly signed with the IB key from a
-                 * previous process.
+                 * If the __cleanup function pointer was signed, then
+                 * it was the signed with IB key, possibly the IB key
+                 * of the previous process if this is a restart.
                  *
-                 * Strip the function pointer and re-sign it with
-                 * the current IB key for this process.
+                 * Thus, the function pointer needs to be stripped and
+                 * re-signed with the current IB key and implementation
+                 * defined modifier to avoid PAC failure.
                  *
-                 * The modifier used for signing and authenticating is
-                 * the storage address of the function pointer blended
-                 * with the 16-bit immediate value 0x211b, i.e.
-                 * libsystem_c.dylib is using ptrauth_blend_discriminator
-                 * to sign function pointers (storage address + constant
-                 * discriminator).
+                 * modifier = &__cleanup | (constant << 48)
+                 *
+                 * The exact authentication sequence used:
+                 *   mov x16, %[__cleanup]
+                 *   mov x17, %[storage address of __cleanup]
+                 *   movk x17, #0x211b, lsl #48
+                 *   autib x16, x17 <- authenticate branch target
+                 *   mov x17, x16
+                 *   xpaci x17
+                 *   cmp x16, x17 
+                 *   b.ne <- abort/trap if neq
                  */
-                XPACI(__cleanup);
-                raw = (u64)__cleanup;
-                mod = (u64)&__cleanup;
-                
-                asm volatile(
-                        "movk %0, #0x211b, lsl #48"
-                        : "+r" (mod)
-                        :
-                        : "memory"
-                );
-                
-                PACIB(raw, mod);
-                *(u64 *)&__cleanup = raw;
+                pac_strip_resign(__cleanup, PAC_IB_KEY, 0x211b, 1);
         }
 
         exit(status);
+}
+
+void __abort(void)
+{
+        if (PTRAUTH_SIGNED((u64)__cleanup))
+                pac_strip_resign(__cleanup, PAC_IB_KEY, 0x211b, 1);
+
+        abort();
 }

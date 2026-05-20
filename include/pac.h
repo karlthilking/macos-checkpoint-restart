@@ -242,12 +242,31 @@
         );                              \
 } while (0)
 
-enum {
+#define pac_strip_resign(__ptr, __key, __constant, __blend) do { \
+        u64 __mod, __result;                                     \
+        if ((__key) == PAC_IB_KEY)                               \
+                XPACI((__ptr));                                  \
+        else if ((__key) == PAC_DB_KEY)                          \
+                XPACD((__ptr));                                  \
+        if ((__blend) != 0) {                                    \
+                __mod =  (u64)&(__ptr);                          \
+                __mod |= ((u64)(__constant) << 48);              \
+        } else                                                   \
+                __mod = (__constant);                            \
+        __result = (u64)(__ptr);                                 \
+        if ((__key) == PAC_IB_KEY)                               \
+                PACIB(__result, __mod);                          \
+        else if ((__key) == PAC_DB_KEY)                          \
+                PACDB(__result, __mod);                          \
+        *(u64 *)&(__ptr) = __result;                             \
+} while (0)
+
+typedef enum pac_key {
         PAC_IA_KEY = 0u, // Instruction A Key   (process independent)
         PAC_IB_KEY = 1u, // Instruction B Key   (process dependent)
         PAC_DA_KEY = 2u, // Data A Key          (process independent)
         PAC_DB_KEY = 3u  // Data B Key          (process dependent)
-};
+} pac_key_t;
 
 enum {
         ARM64_FP = 29, ARM64_LR = 30, ARM64_SP = 31, ARM64_PC = 32
