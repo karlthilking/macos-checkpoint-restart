@@ -265,44 +265,59 @@ void pac_sign_frames(const ckpt_callframe_t *frames,
 
 void pac_check()
 {
-        int     fail = 0;
-        u64     check, mod = 0ull;
-        
-        check = ((u64)rand() << 16u) % UINT64_MAX;
-        check &= ~PAC_BIT_MASK;
+        int     err = 0;
+        u64     data_ptr, instr_ptr, mod = 0ull;
 
-        PACIB(check, mod);
-        if (PTRAUTH_SIGNED(check)) {
-                AUTIB(check, mod);
-        } else {
-                fprintf(stderr, "pacib noop\n");
-                fail = 1;
-        }
-        
-        PACIA(check, mod);
-        if (PTRAUTH_SIGNED(check)) {
-                AUTIA(check, mod);
+        asm volatile(
+                "mov x9, sp     \n"
+                "mov x10, x30   \n"
+                "xpacd x9       \n"
+                "xpaci x10      \n"
+                "mov %0, x9     \n"
+                "mov %1, x10    \n"
+                : "=r" (data_ptr), "=r" (instr_ptr)
+                :
+                : "memory"
+        );
+
+        /* Test instruction address pac and aut instructions */
+        PACIA(instr_ptr, mod);
+        if (PTRAUTH_SIGNED(instr_ptr)) {
+                AUTIA(instr_ptr, mod);
+                assert(!PTRAUTH_SIGNED(instr_ptr));
         } else {
                 fprintf(stderr, "pacia noop\n");
-                fail = 1;
+                err = 1;
         }
 
-        PACDB(check, mod);
-        if (PTRAUTH_SIGNED(check)) {
-                AUTDB(check, mod);
+        PACIB(instr_ptr, mod);
+        if (PTRAUTH_SIGNED(instr_ptr)) {
+                AUTIB(instr_ptr, mod);
+                assert(!PTRAUTH_SIGNED(instr_ptr));
+        } else {
+                fprintf(stderr, "pacib noop\n");
+                err = 1;
+        }
+
+        /* Test data address pac and aut instructions */
+        PACDA(data_ptr, mod);
+        if (PTRAUTH_SIGNED(data_ptr)) {
+                AUTDA(data_ptr, mod);
+                assert(!PTRAUTH_SIGNED(data_ptr));
+        } else {
+                fprintf(stderr, "pacda noop\n");
+                err = 1;
+        }
+
+        PACDB(data_ptr, mod);
+        if (PTRAUTH_SIGNED(data_ptr)) {
+                AUTDB(data_ptr, mod);
+                assert(!PTRAUTH_SIGNED(data_ptr));
         } else {
                 fprintf(stderr, "pacdb noop\n");
-                fail = 1;
+                err = 1;
         }
 
-        PACDA(check, mod);
-        if (PTRAUTH_SIGNED(check)) {
-                AUTDA(check, mod);
-        } else {
-                fprintf(stderr, "pacda, noop\n");
-                fail = 1;
-        }
-
-        if (fail)
+        if (err)
                 __builtin_trap();
 }
