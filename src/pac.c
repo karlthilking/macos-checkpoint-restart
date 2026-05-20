@@ -277,7 +277,7 @@ void pac_check()
                 "mov %1, x10    \n"
                 : "=r" (data_ptr), "=r" (instr_ptr)
                 :
-                : "memory"
+                : "x9", "x10", "memory"
         );
 
         /* Test instruction address pac and aut instructions */
