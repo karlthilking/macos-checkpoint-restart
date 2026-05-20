@@ -172,11 +172,11 @@ int ckpt_vm_region_restore(int fd, ckpt_vm_region_t *rgn)
         kern_return_t           ret;
         mach_vm_address_t       addr;
 
-        if (rgn->start == 0 || rgn->end == 0) {
-                fprintf(stderr, 
-                        "%s:ckpt_vm_region_restore: "
-                        "Invalid Region:\t%p-%p\n", 
-                        __FILE__, rgn->start, rgn->end);
+        if (rgn->start == NULL || rgn->end == NULL) {
+                fprintf(stderr,
+                        "ckpt_vm_region_restart: "
+                        "Region is invalid (%p-%p)\n",
+                        rgn->start, rgn->end);
                 return -1;
         }
         
@@ -193,8 +193,8 @@ int ckpt_vm_region_restore(int fd, ckpt_vm_region_t *rgn)
         );
 
         if (ret != KERN_SUCCESS || (void *)addr != rgn->start) {
-                fprintf(stderr, "%s: mach_vm_map: %s\n",
-                        __FILE__, mach_error_string(ret));
+                fprintf(stderr, "mach_vm_map: %s\n",
+                        mach_error_string(ret));
                 return -1;
         }
         
@@ -211,15 +211,13 @@ int ckpt_vm_region_restore(int fd, ckpt_vm_region_t *rgn)
          * original protections that this region had in the checkpointed
          * process, set the protections back to what they were previously.
          */
-        if (rgn->prot != VM_PROT_DEFAULT) {
-                if (ckpt_vm_region_protect(rgn, 0, rgn->prot) < 0)
-                        return -1;
-        }
+        if (rgn->prot != VM_PROT_DEFAULT &&
+            ckpt_vm_region_protect(rgn, 0, rgn->prot) < 0)
+                return -1;
 
-        if (rgn->max_prot != VM_PROT_ALL) {
-                if (ckpt_vm_region_protect(rgn, 1, rgn->max_prot) < 0)
-                        return -1;
-        }
+        if (rgn->max_prot != VM_PROT_ALL &&
+            ckpt_vm_region_protect(rgn, 1, rgn->max_prot) < 0)
+                return -1;
 
         return 0;
 }
