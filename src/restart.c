@@ -37,8 +37,8 @@ void restart(int fd, int depth)
 
                 if (retval < 0) {
                         fprintf(stderr, 
-                                "%s: Failed to read checkpoint file, "
-                                "aborting restart...\n", __FILE__);
+                                "Failed to read checkpoint file, "
+                                "aborting restart...\n");
                         abort();
                 }
 
@@ -46,12 +46,8 @@ void restart(int fd, int depth)
                 pac_sign_frames(frames, fp, meta.nr_callframes);
                 pac_sign_context(&contexts[0]);
                 
-                if (setcontext(&contexts[0].uc) < 0) {
-                        fprintf(stderr, 
-                                "%s: setcontext() failed, aborting...\n",
-                                __FILE__);
-                        abort();
-                }
+                if (setcontext(&contexts[0].uc) < 0)
+                        err(EXIT_FAILURE, "setcontext()");
         }
         
         abort();
