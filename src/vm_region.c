@@ -11,16 +11,25 @@
 int ckpt_vm_region_valid(vm_region_submap_info_data_64_t *info,
                          mach_vm_address_t addr, mach_vm_size_t size)
 {
-        if (PAGEZERO(addr, size) ||
-            info->inheritance == VM_INHERIT_NONE ||
-            info->max_protection == VM_PROT_NONE) {
+        if (PAGEZERO(addr, size) || info->max_protection == VM_PROT_NONE)
+                return 0;
+        else if (info->inheritance == VM_INHERIT_NONE ||
+                 info->behavior == VM_BEHAVIOR_DONTNEED) {
+                /**
+                 * The restart process marks its own pages with
+                 * inheritance = VM_INHERIT_NONE and
+                 * behavior = VM_BEHAVIOR_DONTNEED, so this region
+                 * should be one of the restart program's regions
+                 * (can be safely ignored during checkpoint).
+                 */
                 return 0;
         } else if (DYLD_SHARED_CACHE_REGION(addr, size)) {
-                if (VM_REGION_PRIVATE(info) && info->pages_dirtied &&
-                    (info->max_protection & VM_PROT_WRITE)) {
-                        return 1;
-                }
-                return 0;
+                /**
+                 * Only checkpoint dyld shared cache regions that are
+                 * private or COW, dirty, and writable.
+                 */
+                return (VM_REGION_PRIVATE(info) && info->pages_dirtied &&
+                        (info->max_protection & VM_PROT_WRITE));
         }
 
         switch (info->user_tag) {
@@ -122,14 +131,24 @@ int ckpt_vm_regions_mark(vm_inherit_t new_inherit,
                 else if (info.is_submap) {
                         depth++;
                         continue;
+                } else if (PAGEZERO(addr, size) ||
+                           info.protection == VM_PROT_NONE ||
+                           DYLD_SHARED_CACHE_REGION(addr, size)) {
+                        /**
+                         * Don't need to mark which will already be
+                         * ignored or handled during a checkpoint for
+                         * obvious reasons.
+                         */
+                        addr += size;
+                        continue;
                 }
 
                 ret = mach_vm_inherit(
                         mach_task_self(), addr, size, new_inherit
                 );
                 if (ret != KERN_SUCCESS) {
-                        fprintf(stderr, "%s: mach_vm_inherit: %s\n",
-                                __FILE__, mach_error_string(ret));
+                        fprintf(stderr, "mach_vm_inherit: %s\n",
+                                mach_error_string(ret));
                         return -1;
                 }
 
@@ -137,8 +156,8 @@ int ckpt_vm_regions_mark(vm_inherit_t new_inherit,
                         mach_task_self(), addr, size, new_behavior
                 );
                 if (ret != KERN_SUCCESS) {
-                        fprintf(stderr, "%s: mach_vm_behavior_set: %s\n",
-                                __FILE__, mach_error_string(ret));
+                        fprintf(stderr, "mach_vm_behavior_set: %s\n",
+                                mach_error_string(ret));
                         return -1;
                 }
 

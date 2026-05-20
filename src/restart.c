@@ -24,7 +24,7 @@ void restart(int fd, int depth)
                 retval = ckpt_vm_regions_mark(VM_INHERIT_NONE,
                                               VM_BEHAVIOR_DONTNEED);
 
-                if (retval < 0 || readall(fd, &meta, sizeof(meta)) < 0
+                if (retval < 0 || readall(fd, &meta, sizeof(meta)) < 0 ||
                     shared_cache_check(&meta.shared_cache_info) < 0)
                         exit(EXIT_FAILURE);
 
