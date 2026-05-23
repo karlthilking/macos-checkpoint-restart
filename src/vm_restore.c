@@ -74,7 +74,8 @@ int ckpt_vm_restore_region(int fd, const ckpt_vm_region_t *region)
         
         /* Allocate checkpointed memory region */
         ret = mach_vm_map(mach_task_self(), &addr, region->size, 0,
-                          VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                          VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE |
+                          VM_MAKE_TAG(region->tag),
                           MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_DEFAULT,
                           VM_PROT_ALL, VM_INHERIT_DEFAULT);
         

@@ -1,5 +1,6 @@
 /* vm_checkpoint.c */
 #include <assert.h>
+#include <stdio.h>
 #include "vm_region.h"
 
 int ckpt_vm_repeat_region(const vm_region_submap_info_data_64_t *info,
@@ -94,7 +95,8 @@ u32 ckpt_vm_save_regions(ckpt_vm_region_t *regions)
         natural_t                       depth   = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t          count;
-
+        
+        (void)ckpt_vm_repeat_region(NULL, 1);
         for (;;) {
                 count = VM_REGION_SUBMAP_INFO_COUNT_64;
                 ret = mach_vm_region_recurse(
@@ -135,7 +137,7 @@ void ckpt_vm_deallocate_regions()
         natural_t                       depth   = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t          count;
-
+        
         for (;;) {
                 count = VM_REGION_SUBMAP_INFO_COUNT_64;
                 ret = mach_vm_region_recurse(
