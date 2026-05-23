@@ -76,7 +76,6 @@ int ckpt_vm_mark_regions();
 int ckpt_vm_restore_region(int, const ckpt_vm_region_t *);
 
 /* Functions implemented in vm_checkpoint.c and used by libckpt.dylib */
-int ckpt_vm_repeat_region(const vm_region_submap_info_data_64_t *, int);
 int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *,
                          mach_vm_address_t, mach_vm_size_t);
 u32 ckpt_vm_save_regions(ckpt_vm_region_t *);

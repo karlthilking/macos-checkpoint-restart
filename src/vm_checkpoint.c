@@ -3,28 +3,6 @@
 #include <stdio.h>
 #include "vm_region.h"
 
-int ckpt_vm_repeat_region(const vm_region_submap_info_data_64_t *info,
-                          int clear)
-{
-        static vm32_object_id_t object_ids[64];
-        static u32              length;
-
-        if (clear) {
-                length = 0;
-                return 0;
-        }
-
-        assert(info != NULL);
-        for (u32 i = 0; i < length; i++) {
-                if (info->object_id == object_ids[i])
-                        return 1;
-        }
-
-        assert(length + 1 < 64);
-        object_ids[length++] = info->object_id;
-        return 0;
-}
-
 int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
                          mach_vm_address_t addr, mach_vm_size_t size)
 {
@@ -33,13 +11,6 @@ int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
         else if (RESTART_REGION(info)) {
                 /* Restart region, can be discared */
                 return 0;
-        } else if (VM_REGION_ALIASED(info) && 
-                   ckpt_vm_repeat_region(info, 0)) {
-                /**
-                 * If this region is an alias and another alias of
-                 * the same physical mapping has already been saved, skip
-                 */
-                 return 0;
         } else if (DYLD_SHARED_CACHE_REGION(addr, size)) {
                 /**
                  * On save shared cache regions that are private/COW,
@@ -96,7 +67,6 @@ u32 ckpt_vm_save_regions(ckpt_vm_region_t *regions)
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t          count;
         
-        (void)ckpt_vm_repeat_region(NULL, 1);
         for (;;) {
                 count = VM_REGION_SUBMAP_INFO_COUNT_64;
                 ret = mach_vm_region_recurse(
