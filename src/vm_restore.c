@@ -21,21 +21,16 @@ int ckpt_vm_mark_regions()
 
                 if (ret != KERN_SUCCESS)
                         break;
-                else if (info.is_submap) {
-                        depth++;
+                else if (info.is_submap ||
+                         info.max_protection == VM_PROT_NONE) {
+                        addr += size;
                         continue;
                 } else if (PAGEZERO(addr, size) ||
-                           info.protection == VM_PROT_NONE ||
                            DYLD_SHARED_CACHE_REGION(addr, size)) {
-                        /**
-                         * Skip regions that are already handled specially
-                         * in ckpt_vm_valid_region(), marking them is
-                         * unnecessary.
-                         */
                         addr += size;
                         continue;
                 }
-
+        
                 ret = mach_vm_inherit(
                         mach_task_self(), addr, size,
                         RESTART_REGION_INHERIT_FLAG
@@ -77,7 +72,7 @@ int ckpt_vm_restore_region(int fd, const ckpt_vm_region_t *region)
                           VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE |
                           VM_MAKE_TAG(region->tag),
                           MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_DEFAULT,
-                          VM_PROT_ALL, VM_INHERIT_DEFAULT);
+                          VM_PROT_ALL, region->inherit);
         
         if (ret != KERN_SUCCESS) {
                 fprintf(stderr, "mach_vm_map: %s\n",
@@ -86,7 +81,6 @@ int ckpt_vm_restore_region(int fd, const ckpt_vm_region_t *region)
         }
         
         assert((void *)addr == region->start);
-        /* Restore saved memory contents in checkpoint file to region */
         if (readall(fd, (void *)addr, region->size) < 0)
                 return -1;
 

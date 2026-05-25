@@ -12,15 +12,11 @@ int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
                 /* Restart region, can be discared */
                 return 0;
         } else if (DYLD_SHARED_CACHE_REGION(addr, size)) {
-                /**
-                 * On save shared cache regions that are private/COW,
-                 * contain dirty pages, and are writable. i.e. this
-                 * region was a COW page that was faulted in and thus
-                 * should be restored.
-                 */
-                if (VM_REGION_PRIVATE(info) && info->pages_dirtied &&
-                    (info->max_protection & VM_PROT_WRITE))
+                if ((info->max_protection & VM_PROT_WRITE) &&
+                    VM_REGION_PRIVATE(info) && info->pages_dirtied) {
+                        assert(!VM_REGION_ALIASED(info));
                         return 1;
+                }
                 return 0;
         }
 
@@ -35,25 +31,36 @@ int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
         case VM_MEMORY_MALLOC_LARGE_REUSABLE:
         case VM_MEMORY_MALLOC_LARGE_REUSED:
         case VM_MEMORY_MALLOC_PROB_GUARD:
+                if (info->pages_dirtied) {
+                        assert(info->max_protection & VM_PROT_WRITE);
+                        return 1;
+                }
+                return 0;
         case VM_MEMORY_STACK:
+                if (info->pages_dirtied > 0) {
+                        assert((info->max_protection & VM_PROT_WRITE) &&
+                               VM_REGION_PRIVATE(info));
+                        return 1;
+                }
+                return 0;
         case VM_MEMORY_DYLD:
         case VM_MEMORY_DYLD_MALLOC:
-                if (info->pages_dirtied == 0)
-                        return 0;
-                return 1;
+                if (info->pages_dirtied) {
+                        assert((info->max_protection & VM_PROT_WRITE) &&
+                               VM_REGION_PRIVATE(info));
+                        return 1;
+                }
+                return 0;
         case VM_MEMORY_REALLOC:
         case VM_MEMORY_GUARD:
         case VM_MEMORY_SHARED_PMAP:
                 return 0;
         case VM_MEMORY_DYLIB:
-                if (VM_REGION_SHARED(info))
-                        return 0;
-                assert(info->max_protection & VM_PROT_WRITE);
                 return 1;
         default:
                 break;
         }
-
+        
         return 1;
 }
 
@@ -85,8 +92,9 @@ u32 ckpt_vm_save_regions(ckpt_vm_region_t *regions)
                 }
                 
                 regions[nr_rgns].start          = (void *)addr;
-                regions[nr_rgns].size           = (size_t)size;
                 regions[nr_rgns].end            = (void *)(addr + size);
+                regions[nr_rgns].size           = (size_t)size;
+                regions[nr_rgns].inherit        = info.inheritance;
                 regions[nr_rgns].prot           = info.protection;
                 regions[nr_rgns].max_prot       = info.max_protection;
                 regions[nr_rgns].mode           = info.share_mode;
@@ -117,16 +125,14 @@ void ckpt_vm_deallocate_regions()
 
                 if (ret != KERN_SUCCESS)
                         break;
-                else if (info.is_submap || VM_REGION_SHARED(&info) ||
-                         DYLD_SHARED_CACHE_REGION(addr, size)) {
-                        addr += size;
-                        continue;
+                else if (RESTART_REGION(&info)) {
+                        ret = mach_vm_deallocate(mach_task_self(), 
+                                                 addr, size);
+                        if (ret != KERN_SUCCESS)
+                                fprintf(stderr, "mach_vm_deallocate: %s\n",
+                                        mach_error_string(ret));
                 }
-                
+
                 addr += size;
-                if (RESTART_REGION(&info)) {
-                        mach_vm_deallocate(mach_task_self(), 
-                                           addr - size, size);
-                }
         }
 }

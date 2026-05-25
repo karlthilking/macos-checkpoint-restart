@@ -9,12 +9,14 @@
 #include <mach/vm_prot.h>
 #include <mach/vm_inherit.h>
 #include <mach/vm_behavior.h>
+#include <mach/vm_param.h>
 #include "types.h"
 
 typedef struct ckpt_vm_region {
         const void      *start;
         const void      *end;
         size_t          size;
+        vm_inherit_t    inherit;
         int             prot;
         int             max_prot;
         u32             mode;
