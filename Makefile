@@ -1,4 +1,4 @@
-ARCH    ?= arm64
+RCH    ?= arm64
 CC      := clang
 CFLAGS  := -Wall -Wno-deprecated-declarations -g3 -O0 -arch $(ARCH)
 
@@ -9,13 +9,13 @@ INCLUDE := ./include
 LIBCKPT_SOURCES := $(SRC)/libckpt.c $(SRC)/pac.c $(SRC)/vm_common.c \
                    $(SRC)/vm_checkpoint.c $(SRC)/writeckpt.c \
                    $(SRC)/time_wrappers.c $(SRC)/shared_cache.c \
-                   $(SRC)/exit_wrappers.c
+                   $(SRC)/exit_wrappers.c $(SRC)/pthread_wrappers.c
 
 RESTART_SOURCES := $(SRC)/restart.c $(SRC)/pac.c $(SRC)/vm_common.c \
                    $(SRC)/vm_restore.c $(SRC)/readckpt.c \
                    $(SRC)/shared_cache.c
 
-TESTS           := count 
+TESTS           := count funcptr det
 BINARIES        := ckpt printckpt $(TESTS)
 ALL             := $(BINARIES) restart libckpt.dylib
 

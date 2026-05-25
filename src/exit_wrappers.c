@@ -32,7 +32,7 @@ void __exit(int status)
                  *   cmp x16, x17 
                  *   b.ne <- abort/trap if neq
                  */
-                pac_strip_resign(__cleanup, PAC_IB_KEY, 0x211b, 1);
+                pac_strip_resign(__cleanup, APIBKey, 0x211b, 1);
         }
 
         exit(status);
@@ -41,7 +41,7 @@ void __exit(int status)
 void __abort(void)
 {
         if (PTRAUTH_SIGNED((u64)__cleanup))
-                pac_strip_resign(__cleanup, PAC_IB_KEY, 0x211b, 1);
+                pac_strip_resign(__cleanup, APIBKey, 0x211b, 1);
 
         abort();
 }
