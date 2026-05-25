@@ -40,7 +40,7 @@ void restart(int fd)
         
         fp = get_ucontext_fp(&ctx);
         if (PTRAUTH_SIGNED(fp))
-                XPACI(fp);
+                XPACD(fp);
         pac_resign_frames((u64 *)fp);
         
         pac_patch_context(&ctx);
