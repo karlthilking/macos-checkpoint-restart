@@ -242,11 +242,16 @@
         );                              \
 } while (0)
 
+#define APIAKey 0
+#define APIBKey 1
+#define APDAKey 2
+#define APDBKey 3
+
 #define pac_strip_resign(__ptr, __key, __constant, __blend) do { \
         u64 __mod, __result;                                     \
-        if ((__key) == PAC_IB_KEY)                               \
+        if ((__key) == APIBKey)                                  \
                 XPACI((__ptr));                                  \
-        else if ((__key) == PAC_DB_KEY)                          \
+        else if ((__key) == APDBKey)                             \
                 XPACD((__ptr));                                  \
         if ((__blend) != 0) {                                    \
                 __mod =  (u64)&(__ptr);                          \
@@ -254,50 +259,12 @@
         } else                                                   \
                 __mod = (__constant);                            \
         __result = (u64)(__ptr);                                 \
-        if ((__key) == PAC_IB_KEY)                               \
+        if ((__key) == APIBKey)                                  \
                 PACIB(__result, __mod);                          \
-        else if ((__key) == PAC_DB_KEY)                          \
+        else if ((__key) == APDBKey)                             \
                 PACDB(__result, __mod);                          \
         *(u64 *)&(__ptr) = __result;                             \
 } while (0)
-
-typedef enum pac_key {
-        PAC_IA_KEY = 0u, // Instruction A Key   (process independent)
-        PAC_IB_KEY = 1u, // Instruction B Key   (process dependent)
-        PAC_DA_KEY = 2u, // Data A Key          (process independent)
-        PAC_DB_KEY = 3u  // Data B Key          (process dependent)
-} pac_key_t;
-
-enum {
-        ARM64_FP = 29, ARM64_LR = 30, ARM64_SP = 31, ARM64_PC = 32
-};
-#define ARM_THREAD_STATE64_GPREGCOUNT   29
-
-/**
- * ckpt_callframe_t:
- *  Stack frame live during checkpoint which contains a signed
- *  link register in its frame record.
- *
- * @fp:         Frame pointer in frame record (points to previous frame)
- * @lr:         Link register in frame record (signed with pac* instr)
- * @flags:      Metadata, additional information
- */
-typedef struct ckpt_callframe {
-        u64     fp;
-        u64     lr;
-        u64     flags;
-} ckpt_callframe_t;
-
-#define FRAME_LR_SIGNED(__cf) \
-        ((__cf)->flags & 0x1)
-#define FRAME_PAC_KEY(__cf) \
-        (((__cf)->flags >> 1) & 0x3)
-#define FRAME_PAC_MODIFIER(__cf) \
-        ((__cf)->flags >> 3)
-
-#define FRAME_SET_FLAGS(__cf, __sign, __key, __mod) \
-        ((__cf)->flags = \
-        (((__mod) << 3) | ((__key) << 1) | (__sign)))
 
 #define for_each_frame(__fp) \
         for (; __fp != NULL; __fp = (u64 *)__fp[0])
@@ -326,53 +293,9 @@ static inline u64 *next_signed_frame(u64 *fp)
         return NULL;
 }
 
-/**
- * ckpt_context_t:
- *  Register context including ucontext_t struct and additional
- *  pointer authentication related information including modifier values
- *  and pointer bitmap.
- *
- * @uc:         General user context information
- * @modifiers:  Modifier values for pointers which were signed
- * @bitmap:     Bitmap marking which pointers were signed
- *
-* ****** TO-DO ******
- *  - Only certain registers are saved during getcontext() so it is not
- *    necessary to make space for 33 possible modifiers
- */
-typedef struct ckpt_context {
-        ucontext_t      uc;
-        u64             modifiers[33];
-        u64             bitmap;
-} ckpt_context_t;
+typedef ucontext_t ckpt_context_t;
 
-static inline void ucontext_memcpy(ucontext_t *dst, const ucontext_t *src)
-{
-        /**
-         * Copy ucontext_t bytes from source to destination.
-         * Additionally, copy data pointed to by src->uc_mcontext to
-         * dst->__mcontext_data because uc_mcontext is a pointer.
-         */
-        memcpy(dst, src, sizeof(ucontext_t));
-        memcpy(&dst->__mcontext_data, src->uc_mcontext,
-               sizeof(dst->__mcontext_data));
-        
-        /* Make dst->uc_mcontext point to dst->__mcontext_data */
-        dst->uc_mcontext = (mcontext_t)&dst->__mcontext_data;
-}
-
-void pac_patch_ucontext(ucontext_t *);
-
-/* Strip signed registers in arm64e context */
-int pac_strip_context(ckpt_context_t *);
-/* Re-sign previous signed registers in arm64e context */
-void pac_sign_context(ckpt_context_t *);
-
-/* Strip link registers in live stack frame records */
-u32 pac_strip_frames(ckpt_callframe_t *, u64 *);
-/* Re-sign link registers in live stack frame records */
-void pac_sign_frames(const ckpt_callframe_t *, u64 *, const u32);
-
-void pac_check();
+void pac_patch_context(ckpt_context_t *);
+void pac_resign_frames(u64 *);
 
 #endif // __CKPT_PAC_H__

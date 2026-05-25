@@ -28,8 +28,6 @@ int writeall(int fd, const void *buf, size_t size)
 
 int write_vm_region(int fd, const ckpt_vm_region_t *rgn)
 {
-        int retval = 0;
-
         /* Write vm region information (range, protections, etc) */
         if (writeall(fd, (void *)rgn, sizeof(*rgn)) < 0)
                 return -1;
@@ -39,19 +37,15 @@ int write_vm_region(int fd, const ckpt_vm_region_t *rgn)
          * bits, temporarily grant read permission in order to save
          * the contents of the region to the checkpoint file.
          */
-        if (rgn->prot == VM_PROT_NONE) {
-                retval = ckpt_vm_region_protect(rgn, 0, VM_PROT_READ);
-                retval |= writeall(fd, (void *)rgn->start, rgn->size);
-                retval |= ckpt_vm_region_protect(rgn, 0, VM_PROT_NONE);
-        } else if (writeall(fd, (void *)rgn->start, rgn->size) < 0)
-                retval = -1;
-
-        return retval;
-}
-
-int write_callframe(int fd, const ckpt_callframe_t *cf)
-{
-        if (writeall(fd, (void *)cf, sizeof(*cf)) < 0)
+        if (rgn->prot == VM_PROT_NONE &&
+            ckpt_vm_protect(rgn, 0, VM_PROT_READ) < 0)
+                return -1;
+        
+        if (writeall(fd, rgn->start, rgn->size) < 0)
+                return -1;
+        
+        if (rgn->prot == VM_PROT_NONE &&
+            ckpt_vm_protect(rgn, 0, VM_PROT_NONE) < 0)
                 return -1;
 
         return 0;
@@ -68,30 +62,25 @@ int write_context(int fd, const ckpt_context_t *ctx)
 int write_ckpt(const ckpt_metadata_t *meta, 
                const ckpt_header_t *headers, 
                const ckpt_vm_region_t *regions, 
-               const ckpt_context_t *contexts, 
-               const ckpt_callframe_t *callframes)
+               const ckpt_context_t *contexts)
 {
         int                     fd, retval;
         char                    ckptfile[128];
         const ckpt_vm_region_t  *rgn    = regions;
         const ckpt_context_t    *ctx    = contexts;
-        const ckpt_callframe_t  *cf     = callframes;
         
         snprintf(ckptfile, sizeof(ckptfile), "%d-ckpt.dat", getpid());
         fd = open(ckptfile, O_CREAT | O_WRONLY |
                   O_TRUNC, S_IRUSR | S_IWUSR);
 
         if (fd < 0) {
-                fprintf(stderr, "%s: open: %s\n", 
-                        __FILE__, strerror(errno));
+                perror("open");
                 return -1;
         }
 
         /* Write checkpoint metadata to beginning of file */
         if (writeall(fd, meta, sizeof(*meta)) < 0) {
-                fprintf(stderr, 
-                        "%s: Error writing checkpoint metedata\n",
-                        __FILE__);
+                fprintf(stderr, "Error writing checkpoint metadata\n");
                 close(fd);
                 return -1;
         }
@@ -100,8 +89,7 @@ int write_ckpt(const ckpt_metadata_t *meta,
                 retval = writeall(fd, &headers[i], sizeof(headers[i]));
                 if (retval != 0) {
                         fprintf(stderr, 
-                                "%s: Error writing checkpoint header\n",
-                                __FILE__);
+                                "Error writing checkpoint header\n");
                         close(fd);
                         return -1;
                 }
@@ -115,10 +103,6 @@ int write_ckpt(const ckpt_metadata_t *meta,
                         retval = writeall(fd, ctx, sizeof(*ctx));
                         ctx++;
                         break;
-                case CKPT_CALLFRAME_HEADER:
-                        retval = writeall(fd, cf, sizeof(*cf));
-                        cf++;
-                        break;
                 default:
                         /* Unrecognized header */
                         __builtin_trap();
@@ -126,8 +110,8 @@ int write_ckpt(const ckpt_metadata_t *meta,
 
                 if (retval < 0) {
                         fprintf(stderr, 
-                                "%s: Error writing %s to checkpoint\n",
-                                __FILE__, CKPT_HEADER_STRING(headers[i]));
+                                "Error writing %s to checkpoint\n",
+                                CKPT_HEADER_STRING(headers[i]));
                         close(fd);
                         return -1;
                 }

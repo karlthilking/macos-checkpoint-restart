@@ -18,7 +18,7 @@ __attribute__((noinline, noreturn))
 void restart(int fd)
 {
         int                     retval;
-        u64                     *fp;
+        u64                     fp;
         ckpt_metadata_t         meta;
 
         retval = ckpt_vm_mark_regions();
@@ -28,11 +28,9 @@ void restart(int fd)
 
         ckpt_header_t           headers[meta.nr_headers];
         ckpt_vm_region_t        regions[meta.nr_regions];
-        ckpt_context_t          contexts[meta.nr_contexts];
-        ckpt_callframe_t        frames[meta.nr_callframes];
+        ckpt_context_t          ctx;
 
-        retval = read_ckpt(fd, &meta, headers,
-                           regions, contexts, frames);
+        retval = read_ckpt(fd, &meta, headers, regions, &ctx);
         if (retval < 0) {
                 fprintf(stderr, 
                         "Failed to read checkpoint file, "
@@ -40,11 +38,13 @@ void restart(int fd)
                 exit(EXIT_FAILURE);
         }
         
-        fp = (u64 *)get_ucontext_fp(&contexts[0].uc);
-        pac_sign_frames(frames, fp, meta.nr_callframes);
-        pac_sign_context(&contexts[0]);
+        fp = get_ucontext_fp(&ctx);
+        if (PTRAUTH_SIGNED(fp))
+                XPACI(fp);
+        pac_resign_frames((u64 *)fp);
         
-        if (setcontext(&contexts[0].uc) < 0)
+        pac_patch_context(&ctx);
+        if (setcontext(&ctx) < 0)
                 err(EXIT_FAILURE, "setcontext()");
         
         abort();
@@ -87,7 +87,6 @@ void jump(int fd)
                 "mov    sp, %[sp]       \n"
                 "mov    x0, %[fildes]   \n"
                 "blraaz %[restart]      \n"
-                "blr    %[restart]      \n"
                 :
                 : [sp] "r" (sp), [fildes] "r" ((long)fd),
                   [restart] "r" (restart)

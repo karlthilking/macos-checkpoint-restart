@@ -12,52 +12,95 @@
 #include "pac.h"
 #include "vm_region.h"
 
-static inline char *arm64_register_string(u32 reg_nr)
+const char *vm_inherit_string(const ckpt_vm_region_t *region)
 {
-        char *buf = malloc(sizeof(char) * 3);
+        static_assert(VM_INHERIT_COPY == VM_INHERIT_DEFAULT &&
+                      VM_INHERIT_LAST_VALID == VM_INHERIT_NONE, "");
 
-        if (reg_nr < 29) {
-                snprintf(buf, 3, "x%u", reg_nr);
-                return buf;
-        }
-
-        switch (reg_nr) {
-        case ARM64_FP:
-                strncpy(buf, "fp", 3);
-                break;
-        case ARM64_LR:
-                strncpy(buf, "lr", 3);
-                break;
-        case ARM64_SP:
-                strncpy(buf, "sp", 3);
-                break;
-        case ARM64_PC:
-                strncpy(buf, "pc", 3);
-                break;
+        switch (region->inherit) {
+        case VM_INHERIT_SHARE:
+                return "VM_INHERIT_SHARE";
+        case VM_INHERIT_COPY:
+                return "VM_INHERIT_COPY";
+        case VM_INHERIT_NONE:
+                return "VM_INHERIT_NONE";
+        case VM_INHERIT_DONATE_COPY:
+                return "VM_INHERIT_DONATE_COPY";
         default:
                 __builtin_trap();
         }
-        
-        assert(buf[2] == '\0');
-        return buf;
 }
 
-static inline const char *pac_key_string(u32 keyno)
+const char *vm_share_mode_string(const ckpt_vm_region_t *region)
 {
-        switch (keyno) {
-        case PAC_IA_KEY:
-                return "IA";
-        case PAC_IB_KEY:
-                return "IB";
-        case PAC_DA_KEY:
-                return "DA";
-        case PAC_DB_KEY:
-                return "DB";
+        switch (region->mode) {
+        case SM_COW:
+                return "SM_COW";
+        case SM_PRIVATE:
+                return "SM_PRIVATE";
+        case SM_EMPTY:
+                return "SM_EMPTY";
+        case SM_SHARED:
+                return "SM_SHARED";
+        case SM_TRUESHARED:
+                return "SM_TRUESHARED";
+        case SM_PRIVATE_ALIASED:
+                return "SM_PRIVATE_ALIASED";
+        case SM_SHARED_ALIASED:
+                return "SM_SHARED_ALIASED";
+        case SM_LARGE_PAGE:
+                return "SM_LARGE_PAGE";
         default:
                 __builtin_trap();
         }
+}
 
-        return NULL;
+const char *vm_user_tag_string(const ckpt_vm_region_t *region)
+{
+        switch (region->tag) {
+        case VM_MEMORY_MALLOC:
+                return "VM_MEMORY_MALLOC";
+        case VM_MEMORY_MALLOC_SMALL:
+                return "VM_MEMORY_MALLOC_SMALL";
+        case VM_MEMORY_MALLOC_LARGE:
+                return "VM_MEMORY_MALLOC_LARGE";
+        case VM_MEMORY_MALLOC_HUGE:
+                return "VM_MEMORY_MALLOC_HUGE";
+        case VM_MEMORY_SBRK:
+                return "VM_MEMORY_SBRK";
+        case VM_MEMORY_REALLOC:
+                return "VM_MEMORY_REALLOC";
+        case VM_MEMORY_MALLOC_TINY:
+                return "VM_MEMORY_MALLOC_TINY";
+        case VM_MEMORY_MALLOC_LARGE_REUSABLE:
+                return "VM_MEMORY_MALLOC_LARGE_REUSABLE";
+        case VM_MEMORY_MALLOC_LARGE_REUSED:
+                return "VM_MEMORY_MALLOC_LARGE_REUSED";
+        case VM_MEMORY_MALLOC_NANO:
+                return "VM_MEMORY_MALLOC_NANO";
+        case VM_MEMORY_MALLOC_MEDIUM:
+                return "VM_MEMORY_MALLOC_MEDIUM";
+        case VM_MEMORY_MALLOC_PROB_GUARD:
+                return "VM_MEMORY_MALLOC_PROB_GUARD";
+        case VM_MEMORY_STACK:
+                return "VM_MEMORY_STACK";
+        case VM_MEMORY_GUARD:
+                return "VM_MEMORY_GUARD";
+        case VM_MEMORY_SHARED_PMAP:
+                return "VM_MEMORY_SHARED_PMAP";
+        case VM_MEMORY_DYLIB:
+                return "VM_MEMORY_DYLIB";
+        case VM_MEMORY_DYLD:
+                return "VM_MEMORY_DYLD";
+        case VM_MEMORY_DYLD_MALLOC:
+                return "VM_MEMORY_DYLD_MALLOC";
+        case VM_MEMORY_LIBDISPATCH:
+                return "VM_MEMORY_LIBDISPATCH";
+        case VM_MEMORY_RESTART_STACK:
+                return "VM_MEMORY_RESTART_STACK";
+        default:
+                return "";
+        }
 }
 
 int readall(int fd, void *buf, size_t size)
@@ -75,20 +118,17 @@ int readall(int fd, void *buf, size_t size)
         return (bytes == size) ? 0 : -1;
 }
 
-int readckpt(int fd, const ckpt_metadata_t *meta,
-             ckpt_header_t *headers, ckpt_vm_region_t *regions,
-             ckpt_context_t *contexts, ckpt_callframe_t *frames)
+int readckpt(int fd, const ckpt_metadata_t *meta, ckpt_header_t *headers, 
+             ckpt_vm_region_t *regions, ckpt_context_t *contexts)
 {
         int                     retval;
         ckpt_vm_region_t        *rgn    = regions;
         ckpt_context_t          *ctx    = contexts;
-        ckpt_callframe_t        *cf     = frames;
 
         for (u32 i = 0; i < meta->nr_headers; i++) {
                 if (readall(fd, headers + i, sizeof(headers[i])) != 0) {
                         fprintf(stderr, 
-                                "%s: Erorr reading checkpoint header\n",
-                                __FILE__);
+                                "Error reading checkpoint header\n");
                         return -1;
                 }
 
@@ -102,17 +142,13 @@ int readckpt(int fd, const ckpt_metadata_t *meta,
                         retval = readall(fd, ctx, sizeof(*ctx));
                         ctx++;
                         break;
-                case CKPT_CALLFRAME_HEADER:
-                        retval = readall(fd, cf, sizeof(*cf));
-                        cf++;
-                        break;
                 default:
                         __builtin_trap();
                 }
 
                 if (retval != 0) {
-                        fprintf(stderr, "%s: Error reading %s data\n",
-                                __FILE__, CKPT_HEADER_STRING(headers[i]));
+                        fprintf(stderr, "Error reading %s data\n",
+                                CKPT_HEADER_STRING(headers[i]));
                         return -1;
                 }
         }
@@ -120,82 +156,60 @@ int readckpt(int fd, const ckpt_metadata_t *meta,
         return 0;
 }
 
-void print_vm_regions(ckpt_vm_region_t *regions, u32 nr_regions)
+void print_vm_regions(const ckpt_vm_region_t *regions, u32 nr_rgns)
 {
-        ckpt_vm_region_t *rgn;
-        
+        const ckpt_vm_region_t *rgn;
+
 printf(
-"***************** Checkpointed Virtual Memory Regions ******************\n"
+"********************* Checkpointed Memory Regions *********************\n"
 );
-        for (rgn = regions; rgn < regions + nr_regions; rgn++) {
+        for (rgn = regions; rgn < regions + nr_rgns; rgn++) {
                 printf("Memory Region #%d:\n"
-                       "    start=%p\n"
-                       "      end=%p\n"
-                       "     size=%zu\n"
-                       "     prot=%s/%s\n",
-                       (int)(rgn - regions),
-                       rgn->start, rgn->end, rgn->size,
-                       VM_PROT_STRING(rgn->prot),
-                       VM_PROT_STRING(rgn->max_prot));
+                       "        start=%p\n"
+                       "          end=%p\n"
+                       "         size=%zu\n"
+                       "         prot=%s/%s\n"
+                       "   share mode=%s\n"
+                       "     user tag=%s\n"
+                       "  inheritance=%s\n",
+                       (int)(rgn - regions), rgn->start, rgn->end, 
+                       rgn->size, VM_PROT_STRING(rgn->prot),
+                       VM_PROT_STRING(rgn->max_prot),
+                       vm_share_mode_string(rgn), 
+                       vm_user_tag_string(rgn),
+                       vm_inherit_string(rgn));
         }
 printf(
-"***********************************************************************\n"
+"**********************************************************************\n"
 );
+
 }
 
 void print_contexts(ckpt_context_t *contexts, u32 nr_contexts)
 {
-        ckpt_context_t *ctx;
+        ckpt_context_t  *ctx;
+        mcontext_t      mctx;
 printf(
 "********************* Checkpointed Thread Contexts ********************\n"
 );
 
         for (ctx = contexts; ctx < contexts + nr_contexts; ctx++) {
-                ctx->uc.uc_mcontext = &ctx->uc.__mcontext_data;
+                mctx = (mcontext_t)&ctx->__mcontext_data;
                 printf("Thread Context #%d:\n", (int)(ctx - contexts));
                 
                 /* General purpose registers */
-                for (u32 i = 19; i <= 28; i++) {
-                        printf("\tx%u:\t0x%llx\n", 
-                               i, ctx->uc.uc_mcontext->__ss.__x[i]);
-                }
+                for (u32 i = 19; i <= 28; i++)
+                        printf("\tx%u:\t0x%llx\n", i, mctx->__ss.__x[i]);
 
                 /* FP/Vector registers */
                 for (u32 i = 8; i <= 15; i++) {
-                        printf("\td%u:\t0x%llx\n",
-                               i, (u64)ctx->uc.uc_mcontext->__ns.__v[i]);
+                        printf("\td%u:\t0x%llx\n", 
+                               i, (u64)mctx->__ns.__v[i]);
                 }
 
-                printf("\tfp:\t0x%llx\n", get_ucontext_fp(&ctx->uc));
-                printf("\tlr:\t0x%llx\n", get_ucontext_lr(&ctx->uc));
-                printf("\tsp:\t0x%llx\n", get_ucontext_sp(&ctx->uc));
-        }
-
-printf(
-"***********************************************************************\n"
-);
-}
-
-void print_callframes(ckpt_callframe_t *frames, u32 nr_callframes)
-{
-        ckpt_callframe_t        *cf;
-        char                    *mod;
-        const char              *key;
-
-printf(
-"******************** Checkpoint Stack Frame Records *******************\n"
-);
-
-        for (cf = frames; cf < frames + nr_callframes; cf++) {
-                mod     = arm64_register_string(FRAME_PAC_MODIFIER(cf));
-                key     = pac_key_string(FRAME_PAC_KEY(cf));
-                printf("Call Frame #%d:\n"
-                       "          fp=0x%llx\n"
-                       "          lr=0x%llx\n"
-                       "         key=%s\n"
-                       "    modifier=%s\n",
-                       (int)(cf - frames), cf->fp, cf->lr, key, mod);
-                free(mod);
+                printf("\tfp:\t0x%llx\n", get_mcontext_fp(mctx));
+                printf("\tlr:\t0x%llx\n", get_mcontext_lr(mctx));
+                printf("\tsp:\t0x%llx\n", get_mcontext_sp(mctx));
         }
 
 printf(
@@ -205,7 +219,6 @@ printf(
 
 void printckpt(int fd)
 {
-        int             retval;
         ckpt_metadata_t meta;
 
         if (readall(fd, &meta, sizeof(meta)) < 0)
@@ -214,16 +227,12 @@ void printckpt(int fd)
         ckpt_header_t           headers[meta.nr_headers];
         ckpt_vm_region_t        regions[meta.nr_regions];
         ckpt_context_t          contexts[meta.nr_contexts];
-        ckpt_callframe_t        frames[meta.nr_callframes];
 
-        retval = readckpt(fd, &meta, headers, 
-                          regions, contexts, frames);
-        if (retval != 0)
+        if (readckpt(fd, &meta, headers, regions, contexts) < 0)
                 exit(EXIT_FAILURE);
 
         print_vm_regions(regions, meta.nr_regions);
         print_contexts(contexts, meta.nr_contexts);
-        print_callframes(frames, meta.nr_callframes);
 }
 
 void usage()
