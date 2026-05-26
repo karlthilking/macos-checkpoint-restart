@@ -1,12 +1,13 @@
 # Internals on Checkpoint-Restart for macOS on Apple Silicon
-This document intends to cover the internals of transparent
-checkpoint-restart on Apple Silicon Devices which use the arm64e 
-architecture. Comparisons between checkpointing on Linux and macOS will
-also be detailed, highlighting the differences between Linux and Darwin
-from the perspective of a checkpoint library. Lastly, pointer
-authentication (PAC) will be covered, including explanation on the
-implications of PAC (on checkpoint-restart) and how PAC-aware
-checkpoint-restart is implemented.
+This document will cover the internals of transparent checkpoint-restart 
+on Apple Silicon Devices that use the arm64e architecture. The document will
+assume the reader has a systems background on Linux, and additionally some
+knowledege of checkpoint-restart. A main theme of this document will be
+pointer authentcation (PAC); The impact that PAC has on checkpointing and
+the implementation of PAC-aware checkpoint-restart will be discussed.
+For those who are unfamiliar with PAC, see [LLVM Pointer Authentication](
+https://clang.llvm.org/docs/PointerAuthentication.html#ptrauth-h) or
+the primer included as a foreword on PAC (§5.1, §5.2).
 
 ## 1. Overall Structure
 - `libckpt.dylib` - A checkpoint library which is injected into a target
@@ -22,24 +23,31 @@ checkpoint file. Finally, `-p` will execute the `printckpt` program on a
 given checkpoint file, and `printckpt` will display the contents of the
 checkpoint file in a human-readable way.
 
-## 2. Checkpoint Memory Regions and Mach Virtual Memory
+## 2. Checkpointing Memory Regions and Mach Virtual Memory
 On Linux, a checkpoint library can read `/proc/self/maps` in order to
-identify memory segments which are mapped in a target's address space when
-performing a checkpoint. macOS does not implement the `/proc` filesystem,
-so Mach VM APIs are used as an alternative. Despite being slightly 
-esoteric, the Mach VM APIs allow for low-level interaction with the VM 
-subsystem and are generally more powerful than the `sys/mman.h` family
-of memory-management functions (`mmap`, `mprotect`, `msync`, etc.).
+identify memory segments which are mapped in a target's address space.
+On macOS, the `/proc` filesystem in not avaiable. Therefore, Mach VM APIs
+are used as an alternative. Mach VM APIs permit low-level interaction with
+the Darwin VM subsystem and are generally more powerful than the 
+`sys/mman.h` family of memory-management functions (`mmap`, `mprotect`, 
+`msync`, etc.).
 
-The capabilities that Mach VM exports to user programs, and how these
-capabilities are used to implement checkpoint-restart are detailed in
-the following sections.
+Although the internals of the Linux's and Mach's VM subsystems differ
+in their own ways, a Mach 'VM Region' is roughly equivalent to a
+'memory segment' on Linux in the context of checkpointing. These two
+terms will be used interchangeably.
+
+The following sections will explain how Mach VM functions are used to
+query and interact with the macOS virtual memory subsystem. As it will be
+seen, these functions provide the memory-management capabilities that are
+needed by a checkpoint library.
 
 ### 2.1 Region Enumeration
 `ckpt_vm_save_regions` (in `vm_checkpoint.c`) iterates through the target
 process's address space using `mach_vm_region_recurse`. On each call to
 this function, the kernel populates a struct with information about one
 particular virtual memory region in the address space.
+
 ```c
 ret = mach_vm_region_recurse(
         mach_task_self(), &addr, &size, &depth,
@@ -47,37 +55,44 @@ ret = mach_vm_region_recurse(
 );
 ```
 
-The specific struct used in `ckpt_vm_save_regions` was of type
-`vm_region_submap_info_data_64_t`. The fields of this struct which get
-populated by the kernel are explained further.
+The specific struct used in `ckpt_vm_save_regions` is of type
+`vm_region_submap_info_data_64_t`. The relevant fields of this struct are
+explained further below.
 
 - **`protection` and `max_protection`** - the current and maximum 
-permissions for a given memory region. The `max_protection` of a region is
-an upper limit on what permissions can be set via `mach_vm_protect`. An
-equivalent concept of `max_protection` does not exist on Linux.
-- **`share_mode`** - `SM_COW`, `SM_PRIVATE`, `SM_SHARED`, etc. Describes
-the exact way in which a memory region may be shared (or not).
-- **`user_tag`** - A constant value which describes the region such as
-`VM_MEMORY_STACK`, `VM_MEMORY_MALLOC` (heap regions), `VM_MEMORY_DYLD`
-(dyld allocations), etc. See §2.2 for more information on user tags.
-- **`page_dirited`** - A count of pages within a memory which have been
-written to.
+  permissions for a given memory region. The `max_protection` of a region 
+  is an upper limit on what permissions can be set via `mach_vm_protect`. 
+  An equivalent concept of `max_protection` does not exist on Linux.
+
+- **`share_mode`** - `SM_COW`, `SM_PRIVATE`, `SM_SHARED`, etc., describes
+  the exact way in which a memory region may be shared (or not).
+
+- **`user_tag`** - A constant value that describes the region such as
+  `VM_MEMORY_STACK`, `VM_MEMORY_MALLOC` (heap regions), `VM_MEMORY_DYLD`
+  (dyld allocations), etc. See §2.2 for more information on user tags.
+
+- **`page_dirtied`** - The number of pages (16KB each on Apple Silicon 
+  Macs) within a given memory region that have been written to.
+
 - **`inheritance`** - Inheritance attributes such as `VM_INHERIT_NONE` or
-`VM_INHERIT_COPY` which are relevant to system calls such as `fork`.
+  `VM_INHERIT_COPY`. These are relevant to system calls such as `fork`.
+
 - **`behavior`** - A constant such as `VM_BEHAVIOR_DONTNEED` or
-`VM_BEHAVIOR_FREE` and analagous to Posix `madvise` advice constants.
+  `VM_BEHAVIOR_FREE`, analagous to POSIX `madvise` advice constants.
 
 ### 2.2 Mach VM `user_tag`
 It is important to understand that a Mach VM region's `user_tag` field
-is an application/library level construct, and not interpreted by the
-kernel itself. Libraries which allocate their own memory or are responsible
-allocating the user process's regions can choose to fill in the `user_tag` 
-field. For example, `libsystem_malloc.dylib` will label regions with a
-`user_tag` such as `VM_MEMORY_MALLOC_NANO`, `VM_MEMORY_MALLOC_LARGE`, etc.,
-and `libsystem_pthread.dylib` assigns the `VM_MEMORY_STACK` label as it 
-responsible for each thread's private stack.
+is an application/library level construct. A region's `user_tag` does not 
+affect how the underlying VM subsystem treats the region. 
 
-A user application can create there own `user_tag`:
+Libraries which allocate memory, either for their own purposes or for user
+programs, can choose to populate the `user_tag` of a memory region. For 
+example, `libsystem_malloc.dylib` will label allocation zones with a 
+`user_tag` such as `VM_MEMORY_MALLOC_NANO` or `VM_MEMORY_MALLOC_LARGE`. 
+`libsystem_pthread.dylib` will assign the `VM_MEMORY_STACK` `user_tag` 
+when it allocates a thread's private stack.
+
+A user application can create their own `user_tag`:
 ```c
 #define MY_CUSTOM_TAG  240
 
@@ -92,18 +107,21 @@ int main(void)
 ```
 
 The main point to note is that not every region will have a `user_tag` 
-value; Although a process's stack and heap segments happen to be given
-a `user_tag` by certain libraries (`libsystem_pthread`, `libsystem_malloc`),
-other memory segments such as text and data have no such tag. Thus, a
-`user_tag` is not a definitive measure for identifying the memory regions
-which reside in a target's address space. The memory region checkpointing
-implementation is discussed further in the following section.
+value. Although a process's stack and heap segments happen to be given
+a `user_tag` by certain libraries (`libsystem_pthread`, 
+`libsystem_malloc`), other memory segments such as text and data will not 
+be tagged. Thus, a `user_tag` is not a definitive measure for identifying 
+the memory regions in a target program's address space. 
 
 ### 2.3 Choosing Which Regions to Save
+As a brief aside, note that the dyld shared cache will be briefly 
+mentioned in this section. While prior knowledge on macOS's shared cache 
+region is not strictly required to understand that following information, 
+consider reading ahead if any details are unclear (§3).
+
 The fuction `ckpt_vm_valid_region` (in `vm_checkpoint.c`) implements the 
-policy that decides which region should be serialized during a checkpoint, 
-and which should be ignored. Pseudo-code is provided to demonstrate how
-this policy is implemented.
+policy that decides which regions should be saved during a checkpoint. The
+following pseudo-code describes the policy:
 
 ```
 if region in __PAGEZERO segment or max_protection == NONE:
@@ -123,60 +141,68 @@ switch user_tag:
                 save
 ```
 
-`__PAGEZERO` is a special memory segment on macOS used to detect null 
+`__PAGEZERO` is a special memory segment on macOS used to catch null 
 pointer derefences. By default, `__PAGEZERO` will be present in every
-macOS address space (unless using the linker flag `-pagezero_size,0`)
-and contains no valid data.
+macOS address space (unless using the linker flag `-pagezero_size,0`).
+The `__PAGEZERO` segment does not contain any valid data.
 
-Because Mach VM has the concept of current and max protections for memory
-regions, `max_protection == NONE` identifies true guard pages. Current
-protections never exceed the maximum, so these regions are inaccessible.
+Because Mach VM has the concept of a current and maximum protection level 
+for memory regions, the predicate `max_protection == NONE` will identify 
+true guard pages. Current protections can never exceed the maximum, so 
+these regions are inaccessible and never contain valid data.
 
 After the `restart` program has restored the state of a checkpoint, its
-memory regions are still present in the address space, but should not
-be saved. The following section (§2.4) will detail exactly how the
-`restart` program's own regions are identified.
+memory regions are still present in the address space. However, `restart`'s
+memory regions should not be saved in a checkpoint. The following section 
+(§2.4)  will detail exactly how the `restart` program's own regions are 
+identified.
 
 Regions within the dyld shared cache (system library cache) are only saved
-if they have been written to by the target process. The dyld shared cache 
-is discussed further in §4.
+if they have been written to by the target process. See §3 for further
+information on the dyld shared cache.
 
-As mentioned before (§2.2), certain libraries mark their allocations with
-a `user_tag` which explains what the memory region is. The target process's
-heap and stack regions are saved as long as they are dirty and writable.
-The additional check to see if a heap or stack region is dirty and writable
-helps to filter out guard pages or unused regions. For example, an 
-application which calls `malloc` with consistently similar allocation sizes 
-will likely only use one of `libsystem_malloc.dylib's` arenas, and thus,
-not all regions with a `VM_MEMORY_MALLOC*` tag need to be saved.
-`VM_MEMORY_DYLD*` tagged regions are allocations belonging to `dyld` which
-contains stateful data and should be restored.
+As mentioned before (§2.2), certain libraries label their allocations with
+a `user_tag`. This way, `user_tag` can help to distinguish between 
+different regions in the address space. Memory regions with a 
+`VM_MEMORY_MALLOC*` or `VM_MEMORY_STACK` tag are saved as long as they 
+contain dirty pages (and are writable, but this is likely implied). 
+Checking to see if heap or stack regions have dirty pages helps to filter 
+out guard pages or unused regions. For example, an application that makes 
+allocations of similar sizes will likely only use one of 
+`libsystem_malloc.dylib`'s arenas. Thus, certain heap zones will contain
+zero dirty pages, and can be skipped during a checkpoint. `VM_MEMORY_DYLD*`
+regions are also saved when they contain dirty pages; Any state that the
+`dyld` has built up in memory should be restored in the `restart` program.
 
-Every dynamic library evaluated by the `VM_MEMORY_DYLIB` case will be a
-user dynamic library due to the fact that macOS system libraries live in
-the dyld shared cache region. Thus, user dynamic libraries are always
-saved because, unlike system libraries (Darwin's `libsystem_c.dylib`,
-`libsystem_pthread.dylib`, etc.), they will not be automically loaded into 
-the restart program by `dyld`.
+The `VM_MEMORY_DYLIB` case of the switch statement is strictly only reached
+by user dynamic library regions. This is because every system library, 
+such as `libsystem_c.dylib` or `libsystem_pthread.dylib`, will be in a 
+shared cache region. Thus, every region belonging to a user dynamic 
+library is saved. Unlike system libraries, user libraries will not be 
+automatically loaded by `dyld` into the `restart` program. Therefore, 
+their memory regions must be saved explicitly.
 
 ### 2.4 The `restart` Program's Memory Segments
-Because the `restart` binary itself occupies memory in the form of its
-text, data, stack, and heap regions, there a two main considerations which
-need to be made. First, it is critical that, when mapping in a checkpointed
-memory region, the restart process does not overwrite own of its own
-regions. If they restart process were to overwrite its own stack or text
-with a restored region, the restart would fail. Secondly, it is would
-unreasonable to checkpoint the restart processes own regions if a 
-checkpoint (`SIGUSR2`) is sent after a restart has completed. After the
-restart process has essentially transformed itself into the checkpointed
-process, its own regions are still present in the address space. Thus,
-certain precautions have to be taken to ensure that the restart programs
-regions are not included in a subsequent checkpoint.
+The `restart` program itself will occupy memory in the form of its
+text, data, stack, and heap regions. There a two considerations which
+need to be made. 
+
+First, it is critical that, when mapping in a checkpointed memory region, 
+the restart process does not overwrite its own memory. For example, if the 
+restart process were to overwrite its own stack or text with a restored 
+region, the restart would fail. 
+
+Secondly, if a subsequent checkpoint is sent after restore, checkpointing 
+the restart process's own memory regions should be strictly avoided. After 
+the `restart` program has successfully restored the state of a checkpoint, 
+its memory regions will still be present in the address space. Thus, 
+certain precautions have to be taken in order to ensure that the `restart` 
+program's regions do not get included in a checkpoint.
 
 To prevent the first issue, the `-segaddr` linker flag is used to pin
-the `restart` binary's segments to fixed addresses. The goal is that the
-chosen addresses will be unlikely to conflict with any of the memory
-regions that will need to be restored at runtime.
+the `restart` binary's segments to fixed addresses. The hope is that the
+chosen addresses will be unlikely to conflict with any of the memory 
+regions which are restored at runtime.
 
 ```make
 restart: ...
@@ -185,21 +211,29 @@ restart: ...
         -Wl,-segaddr,__LINKEDIT,0x300008000
 ```
 
-In order to ensure that the fixed segment addresses are honored, ASLR
-is disabled via the `POSIX_SPAWN_DISABLE_ASLR` flag to `posix_spawn` in
-`ckpt.c`. A restart is then initiated with `ckpt -r <ckpt-file>`, where
-the `ckpt` program execs into the restart program (with `posix_spawn` and
-`flags = POSIX_SPAWN_DISABLE_ASLR | POSIX_SPAWN_SETEXEC`). 
+In order to ensure that the fixed segment addresses are honored, ASLR must
+be disabled for the `restart` program. In order to support this, a restart 
+is invoked by the `ckpt` program using: `./ckpt -r <ckpt-file>`. Seeing 
+the `-r` command line flag, the `ckpt` program will exec into the 
+`restart` program with `posix_spawn` and 
+`flags = POSIX_SPAWN_DISABLE_ASLR | POSIX_SPAWN_EXEC`.
 
-To avoid having restart program's stack conflict with the restored stack,
-the restart program allocates in own temporary stack which it jumps to
-before initiated the restart phase.
+Additionally, to avoid having `restart` program's stack conflict with the 
+stack that will be restored, the `restart` program allocates its own 
+temporary stack.
+
+Furthermore, the `restart` program must take measures to ensure that its
+stack won't conflict with the restored stack. In order to accomplish this, 
+the `restart` program allocates a temporary stack at an address that is
+unlikely to conflict with any restored region. Then, the `restart` program
+switches to its new stack and begins to restore the checkpoint's state.
 
 ```c
-flags = VM_FLAGS_PURGABLE | VM_FLAGS_ANYWHERE | 
-        VM_MAKE_TAG(VM_MEMORY_RESTART_STACK);
-
-ret = mach_vm_map(mach_task_self(), &addr, size, 0, flags,
+mach_vm_address_t addr = 0x320000000;
+...
+ret = mach_vm_map(mach_task_self(), &addr, size, 0,
+                  VM_FLAGS_FIXED | VM_FLAGS_PURGABLE | 
+                  VM_MAKE_TAG(VM_MEMORY_RESTART_STACK),
                   MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_DEFAULT,
                   VM_PROT_ALL, VM_INHERIT_NONE);
 ...
@@ -213,17 +247,18 @@ asm volatile(
 );
 ...
 ```
-Note that the restart program uses `VM_MAKE_TAG(VM_MEMORY_RESTART_STACK)`
-in order to associate its own specific tag with its temporary stack. This
-simultaneously addresses the second problem of avoiding saving the restart
-program's own segments during a checkpoint, as it distinguishes its
-temporary stack from other mappings.
 
-The second challenge is now discussed: How do we make sure that the restart
-program's memory regions do not get saved when a subsequent checkpoint is
-sent? In order to avoid unnecessarily saving the `restart`'s memory regions
-when a another checkpoint (`SIGUSR2`) is sent, special flags are used
-to mark the restart program's regions before it initiates the restart.
+The `restart` program uses `VM_MAKE_TAG(VM_MEMORY_RESTART_STACK)` as an
+argument to `mach_vm_map` in order to create its own `user_tag` for its
+temporary stack. This helps to address the second issue regarding the
+`restart` program's memory regions.
+
+The second challenge with the `restart` program's memory regions is now 
+discussed. The question is as follows: How can one ensure that the 
+`restart` program's memory regions will not get saved by the next 
+checkpoint? To prevent this, the `restart` program marks its own memory 
+regions with special flags that help to distinguish them from other 
+regions in the address space.
 
 ```c
 #define RESTART_REGION_BEHAVIOR_FLAG    VM_BEHAVIOR_RSEQNTL
@@ -234,22 +269,22 @@ Mach VM allows for a user program to set the inheritance and behavior
 attributes of a memory region via `mach_vm_inherit` and 
 `mach_vm_behavior_set`. Two specific behavior and inheritance attributes,
 which are unlikely to both be set by any application, are used as sentinel
-flags to mark the restart program's regions. In `vm_restore.c`, the function
-`ckpt_vm_mark_regions` iterates through the restart programs address space
-and applies these flags to each region belonging to `restart`.
+flags. In `vm_restore.c`, the function `ckpt_vm_mark_regions` iterates 
+through the `restart` program's address space and applies these flags to 
+each region.
 
 ```c
 ...
 ret = mach_vm_inherit(mach_task_self(), addr, size, 
-                RESTART_REGION_INHERIT_FLAG);
+                      RESTART_REGION_INHERIT_FLAG);
 ...
 ret = mach_vm_behavior_set(mach_task_self(), addr, size, 
-                     RESTART_REGION_BEHAVIOR_FLAG);
+                           RESTART_REGION_BEHAVIOR_FLAG);
 ...
 ```
 
 Then, `ckpt_vm_valid_region` is able to identify and properly skip the
-restart program's regions during a subsequent checkpoint.
+`restart` program's regions during a subsequent checkpoint.
 
 ```c
 ...
@@ -263,14 +298,14 @@ else if ((info->inheritance == RESTART_REGION_INHERIT_FLAG &&
 ```
 
 ### 2.5 Restoring Memory Regions
-`ckpt_vm_region_restore` in `vm_restore.c` is responsible for mapping
-saved regions back where the were in the checkpointed process. In order
-to do this, `mach_vm_map` is used with `VM_FLAGS_FIXED` and
-`VM_FLAGS_OVERWRITE`. This achieves the same functionality to `mmap` with
-`MAP_FIXED`, but Mach VM APIs are preferred due to providing better
-integration with the underlying VM subsystem in the Darwin kernel. For
-example, `mach_vm_map` allows one to specify a `cur_protection` and
-`max_protection`, whereas `mmap` does not allow for as much specificity.
+`ckpt_vm_region_restore` in `vm_restore.c` is responsible for restoring the
+memory regions that are saved as part of a checkpoint file. When each 
+memory region is restored, it must be allocated at the fixed virtual 
+address where it resided in the checkpointed process.
+
+In order to do this, `mach_vm_map` is used with `VM_FLAGS_FIXED` and
+`VM_FLAGS_OVERWRITE`. This achieves the same functionality as `mmap` with
+`MAP_FIXED` on Linux.
 
 ```c
 int ckpt_vm_restore_region(int fd, const ckpt_vm_region_t *region)
@@ -294,55 +329,61 @@ int ckpt_vm_restore_region(int fd, const ckpt_vm_region_t *region)
 }
 ```
 
-After calling `mach_vm_map`, the saved bytes in the checkpoint file are
-read directly into the freshly mapped memory region, restoring the live
-memory contents that were present at the time of the checkpoint.
-`mach_vm_map` is called with `cur_protection = VM_PROT_DEFAULT` (`rw-`) and
-`max_protection = VM_PROT_ALL` (`rwx`) for two reasons. First, the mapping
-needs to be writable in order to read the bytes from the file (associated
-with the file descriptor `fd`) into the memory region to restore its data.
-Second, the maximum protection needs to be `VM_PROT_ALL` in order to
-flexibly reconfigure the restored region's permissions. Remember that 
-`max_protection` is an upper limit on what a region's protections can be 
-set to at any point. Consider if the restored region was a text segment and 
-mapped in with `max_protection` set to `VM_PROT_READ | VM_PROT_WRITE`. 
-Thereafter, the protections of the region would not be able to made
-executable (`VM_PROT_EXECUTE`) and the restored page would cause a 
-subsequent fault.
+After calling `mach_vm_map` with `VM_FLAGS_FIXED`, a virtual memory region
+will be allocated with the same virtual address and size that it had in
+the checkpointed process. Then, the next `region->size` bytes from the
+checkpoint file are read directly into the freshly-allocated memory region.
+This will restore the memory contents that were present at checkpoint
+byte-for-byte.
 
-As an additional note, `VM_PROT_WRITE` and `VM_PROT_EXECUTE` can be
+Restored memory regions are created with `cur_protection = VM_PROT_DEFAULT`
+(`rw-`) and `max_protection = VM_PROT_ALL` (`rwx`). The current protection
+level at least requires the region to be writable. This is due to the fact
+that the serialized memory contents (in the checkpoint file associated with
+the file descriptor `fd`) must be written to the region after it has been
+mapped into the address space. Secondly, the maximum protection must be
+set to `VM_PROT_ALL` in order to reset the region's current protection to 
+its value in the checkpoint process. Because a region's maximum protection
+is an upper limit, any value more restrictive than `VM_PROT_ALL` would
+impose a limitation on what the `cur_protection` could be set to 
+thereafter. For example, if `mach_vm_map` was called with 
+`VM_PROT_READ | VM_PROT_WRITE`, attempting to set the execute permission 
+for the region (`VM_PROT_EXECUTE`) would fail.
+
+As an additional note, `VM_PROT_WRITE` and `VM_PROT_EXECUTE` can not be
 set for a region's current protections simultaneously without a specific
-`com.apple.security.cs.allow-jit` entitlement (for JIT compilers).
-Therefore, using `mach_vm_map` rather than `mmap` allows one to write
-to a memory region (to restore checkpointed bytes) and later set the
-execute permission bit. On macOS, `mmap` only specifies one `prot` field
-which sets the current and maximum protections. Thus, if a restored region
-was allocated with `PROT_WRITE` to restore the checkpointed contents,
-the pages within the region can not be set to be executable thereafter.
+`com.apple.security.cs.allow-jit` entitlement. Therefore, both 
+`mach_vm_map` with `cur_protection = VM_PROT_ALL`, and `mmap` with 
+`prot = PROT_READ | PROT_WRITE | PROT_EXEC` will fail on macOS.
 
 ## 3. The dyld Shared Cache
-The dyld Shared Cache is a collection of all commonly used Darwin system
-libraries pre-linked in a single file which lives on disk. On Apple Silicon
-devices this file is named `dyld_shared_cache_arm64e` and there are
-possibly more `subcaches` with an additional file suffix (e.g. 
-`dlyd_shared_cache_arm64e.01`). When a process is created on macOS, this
-file is essentially memory mapped into the process's address space in order
-to make all system libraries available at runtime. This is intended to be
-an optimization of `dyld`'s (the macOS linker/loader) to improve
-application startup time. By including all system libraries in a single
-file, `dyld` allows all processes to share one shared cache and avoids
-loading several shared objects on demand. The relevance that the `dyld`
-shared cache has on checkpointing is due to the fact that it contains the
-data segments on the system libraries within. This means that each process
-receives COW pages for data segments in the shared cache which are faulted
-in once written to. Therefore, it is quite likely for certain virtual memory
-regions within the shared cache to be faulted in during the execution of
-a target process's lifetime, and a checkpoint is not able to simply ignore
-the shared cache.
+The dyld shared cache is a collection of macOS/Darwin system libraries
+pre-linked into a single, on-disk file. On Apple Silicon devices, this
+file is named `dyld_shared_cache_arm64e`. There are possibly additional
+'subcaches' with a unique file suffix (e.g. `dyld_shared_cache_arm64e.01`).
+When a process is created on macOS, this file is memory-mapped into the
+process's address space, making all system libraries available at runtime.
+
+The architecture of the shared cache is intended to be a `dyld` 
+optimization for application startup time. By including every system 
+library in a single file, `dyld` only needs to load the shared cache once, 
+rather than loading several libraries on demand. Furthermore, a large 
+majority of the shared cache is comprised of executable code and constant 
+data. Thus, many of the pages within the in-memory shared cache will be 
+physically shared between processes.
+
+However, the in-memory shared cache also contains mutable data regions.
+A running process will receive Copy-on-Write pages for these regions.
+If a COW page within the shared cache is written to by a process, the page
+will be faulted in, providing the process with its own private copy. When 
+checkpointing a target process, it is quite likely that the target has 
+modified certain pages in the shared cache's data regions. Thus, these
+specific shared cache regions will be private to the target process and
+must be saved during a checkpoint.
 
 ### 3.1 Shared Cache COW Regions
 The exact policy used to decide which regions within the shared cache get
-checkpointed is explained further.
+checkpointed is now explained.
 
 ```c
 int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
@@ -362,100 +403,102 @@ int ckpt_vm_valid_region(const vm_region_submap_info_data_64_t *info,
 }
 ```
 
-The requirements for checkpointing a shared cache region require that
-the region is writable, process private, and contains dirty pages.
-When these conditions are met, it is necessary to include the region in
-a checkpoint in order to restore the mutable state of system libraries.
-While this policy reasonably identifies which regions in the shared cache
-should be saved, it does include certain drawbacks. The main downside is
-that one shared cache `region` as identified by the Mach VM subsystem
-is often multiple megabytes in size. It is possible that certain shared
-cache regions only contain a few dirty pages, meaning the multiple megabytes
-of data from the shared cache will bloat the checkpoint file when only
-an order of tens of kilobytes would have been necessary to save. In order
-to prevent this, it would be desirable to examine shared cache regions at
-the page granularity, but this would require support beyond the Mach VM
-APIs which are currently used.
+The basic policy for deciding if a shared cache region should be
+checkpointed is as follows: If the region is writable, private to the 
+target process, and contains dirty pages, it should be checkpointed.
+Under these conditions, the data within the target's private copy of a
+shared cache region must be included in a checkpoint. Otherwise, the
+version of the shared cache that will be loaded by `dyld` on restart will
+discard any state that the target process has built up in the shared cache.
+
+However, one drawback to this policy relates to efficiency and checkpoint
+file sizes. Although the shared cache file divides into several individual
+virtual memory regions, each individual region still tends to be quite
+large. A typical size for a shared cache region is likely multiple
+megabytes. While the given policy correctly identifies regions containing
+dirty pages, it would be excessive to checkpoint multiple megabytes of data
+when possibly on a few pages have been written to. A more refined approach
+would be to probe shared cache regions at the page granularity, 
+snapshotting dirty pages individually.
 
 ### 3.2 Shared Cache UUID and Slide
-Earlier, it was mentioned that the shared cache file is essentially memory
-mapped into every process's address space. It is important to note that
-the shared cache is not only included in every process's address space,
-but mapped in at the exact same virtual address. This makes it easy to
-restore checkpointed shared cache regions during the same boot. On Apple
-Silicon Devices, the shared cache's base address will be equal to
-`SHARED_REGION_BASE_ARM64 + slide` where `SHARED_REGION_BASE_ARM64` is
-defined in `mach/shared_region.h`. In the common case, the shared cache
-regions which are included in a checkpoint can be restored at the exact
-virtual addresses in the restart process because the slide (and thus the
-base address) will be the same at the time of checkpoint and restart.
-More difficulty is presented when the shared is cache is slid or rebuilt.
+Earlier, it was noted that the shared cache file is present in every
+process's virtual address space. It is important to state that the shared
+cache is not only present in every process's address space, but also
+present at the same virtual address. Thus, it is easy to restore
+checkpointed shared cache regions across the same boot. Each saved region
+from the shared cache can be mapped into the `restart` program's address
+space at the same virtual address where it had been before.
 
-In this case where the shared cache is slid, each saved shared cache region
-can be restored at the its original virtual address plus the difference
-between the current shared cache slide and slide during the time of the
-checkpoint. The shared cache base address is included in a checkpoint file
-in order to allow for this calculation. However, this does not always
-guarantee that a restore will be successful. If any of the restored shared
-cache regions have internal pointers which were relative to the old
-shared cache's base address, these pointers will be stale and possibly harm
-program correctness.
+On Applie Silicon devices, the base address of the in-memory shared cache
+will always be equal or great to `SHARED_REGION_BASE_ARM64`, where
+`SHARED_REGION_BASE_ARM64` is a constant defined in `mach/shared_region.h`.
+In order to restore shared cache regions after the base address of the
+shared cache has changed, we define `slide` to be 
+`base - SHARED_REGION_BASE_ARM64`. A private `dyld` API can be used in
+order to retrieve the base address of the shared cache region:
+`const void *_dyld_get_shared_cache_range(size_t *length)`. The base
+address and size of the shared cache are included as part of a checkpoint
+file's metadata. 
 
-```c
-// slide = base - SHARED_REGION_BASE_ARM64
-struct shared_cache_info {
-        const void      *base;
-        size_t          size;
-        uuid_t          uuid;
-};
+During a restart, we can account for a different shared cache base address:
+
+```
+if old_base == new_base:
+        return
+
+old_slide = old_base - SHARED_REGION_BASE_ARM64
+new_slide = new_base - SHARED_REGION_BASE_ARM64
+shift     = new_base - old_base
+
+for each saved memory region:
+        region.start += shift
+...
 ```
 
-The more difficult case is when the shared cache is entirely rebuilt.
-It is assumed that if the `uuid` of the shared cache, also included as
-part of the `shared_cache_info` in a checkpoint file, that the shared cache
-has been rebuilt. If the shared cache is entirely restructed, it is much
-more difficult than taking the difference of two slides in order to 
-identify where saved regions should be restored. Restoring a from a
-checkpoint that was taken before a rebuild of the shared cache is largely
-infeasible. Luckily, this is only likely to happen across system updates
-and when changes are made to system libraries, which would render old
-checkpoints infeasible regardless.
+However, accounting for shared cache regions to be shifted based on the
+difference between the old and new `slide` does not protect against certain
+problems. Namely, if a restored shared cache region contains pointers to
+other regions in the shared cache, the pointer addresses will be relative 
+to the old shared cache's base address. Furthermore, if a the checkpoint 
+target had pointers into the shared cache, the pointer addresses will also 
+be stale after a restore.
 
 ## 4. Signals handler and the `ckpt_handler`
-A checkpoint is initiated by sending a `SIGUSR2` signal the the target
-process injected with `libckpt.dylib` (by using `ckpt -c <target>`).
-When a `SIGUSR2` is sent, `ckpt_handler` in `libckpt.dylib` will be 
-invoked. This signal handler is responsible for initiating the checkpoint
-process and producing the final checkpoint image file.
-
-The control flow used in `ckpt_handler`, the semantics of signal handlers
-on macOS/Darwin, `_sigtramp` and `__sigreturn`, and reinstalling the
-signal handler after a restart are covered in the following sections.
+In order to coordinate a checkpoint, `libckpt.dylib` uses a signal
+signal handler that is configured to run on a `SIGUSR2`. The signal
+handler, `ckpt_handler`, is installed after `libckpt.dylib` is loaded.
+In order to allow `ckpt_handler` to be installed before the target
+program enters its `main` routine, the environment variable
+`DYLD_INSERT_LIBRARIES` is set before the target program is exec'd.
+Then, by defining a setup function that uses
+`__attribute__((constructor))`, `libckpt.dylib` will successfully
+install its signal handler in a timely manner.
 
 ### 4.1 `ckpt_handler` Control Flow
 ```c
-void ckpt_handler(int sig, siginfo_t *info, void *ctx)
+void ckpt_handler(int sig, siginfo_t *info, void *uctx)
 {
         ckpt_context_t          ctx;
         ...
         static int              restart;
         
         ...
-        restart = 0;
+        is_restart = 0;
         if (getcontext(&ctx.uc) < 0)
                 ...
 
-        if (restart) {
+        if (is_restart) {
                 /* branch taken on restart */
-                restart = 0;
-                ucp     = (ucontext_t *)uctx;
+                is_restart      = 0;
+                ucp             = (ucontext_t *)uctx;
                 ...
                 pac_patch_ucontext(ucp);
                 setcontext(ucp);
         }
         ...
         /* checkpoint path */
-        restart = 1;
+        is_restart = 1;
         ...
 
         /* save memory regions, call frame data, write checkpoint... */
@@ -463,45 +506,59 @@ void ckpt_handler(int sig, siginfo_t *info, void *ctx)
 }
 ```
 
-The first observation of `ckpt_handler`'s implementation is that it uses
-`getcontext` in order to save the thread context. Reflexively, `restart`
-uses `setcontext` in order to restore the saved context. Because,
-`setcontext` returns from `getcontext`, this implies that both the
-checkpoint and restart paths will go through `ckpt_handler`. In order to
-allow the restart path to correctly return from the signal handler (and
-not perform another checkpoint), a static variable, `restart`, is used.
-`restart` restores all memory regions (including `__DATA,__bss`) and
-then calls `setcontext`, causing it to end up in the signal handler.
-Because it has restored the bss segment, it will see `restart = 1` after
-returning from `getcontext` and will be able to take the correct branch.
+Within the checkpoint handler, the live thread context is saved by
+calling `getcontext`. The `ucontext_t` which is filled in by this call
+to `getcontext` will later be saved to the checkpoint file. Thus,
+when the `restart` program calls `setcontext`, it will effectively
+return from the original call to `getcontext`.
 
-Another key detail about the implementation of `ckpt_handler` is that
-it uses two different thread contexts (`ucontext_t`'s). The first
-`getcontext` saves the live register state into `ctx.uc`; this is the
-context which is saved in the checkpoint file and the reason why `restart`
-will return from this call to `getcontext` after restoring the register
-context. The second `ucontext_t` is the third parameter to `ckpt_handler`
-as part of the `SA_SIGINFO` signal handler flavor. This context is the
-one that the restart path uses to return from the signal handler after
-calling `setcontext` in `restart.c`.
+Given this observation, it becomes clear that `ckpt_handler` needs
+some way to take a different branch after a restart in order to
+prevent the `restart` program from initiating another checkpoint.
+In order to achieve this, a static variable `is_restart` can be used
+to distinguish between a checkpoint and a restart. When a checkpoint
+is first initiated, `is_restart` is assigned `0`. Then, only after
+passing the `is_restart` branch will the checkpoint path set
+`is_restart = 1`. With this implementation, the `restart` program will
+see `is_restart == 1` given that it properly restores the memory region
+where `is_restart` resides, namely, `__DATA,__bss`. With the correct
+machinery, `restart` will arrive in `ckpt_handler` via `setcontext`
+and branch on `is_restart`.
 
-The reason why `setcontext` is used a second time during restart to return
-from the signal handler is explained in the next section (§4.2).
+Another key detail regarding the implementation of `ckpt_handler` is that
+the restart branch returns via `setcontext` rather than a normal return.
+The call to `setcontext` along this path uses a second `ucontext_t`
+which is filled in by the kernel when the signal handler's frame is
+initialized. This `ucontext_t`, not to be confused with the `ucontext_t`
+that was saved in the checkpoint file, describes the thread context
+before the signal handler was invoked. Thus, this call to `setcontext`
+will allow the `restart` program to resume execution at the point right
+before the original target was sent a `SIGUSR2`.
+
+While unclear now, the following section will explain why, rather than
+using a normal `return`, a call to `setcontext` is used to return from the 
+signal handler.
 
 ### 4.2 `_sigtramp` and `__sigreturn`
-If a user program sets up for a signal to be caught by a signal handler,
-a sent signal first invokes `_sigtramp` which then invokes the user's
-signal handler. When this signal handler returns (into `_sigtramp`),
-`_sigtramp` will then call `__sigreturn` which will validate a saved
-context before restoring it. If `__sigreturn` happens to detect any
-inconsistencies or validation issues, it will fail and return into
-`_sigtramp`, generating an exception.
+On Darwin, when a signal is sent to a process that has registered a
+signal-catching function, the function `_sigtramp` is called before
+the signal handler executes. The reponsibility of `_sigtramp` is
+to invoke the user's signal handler, and later call `__sigreturn` to
+restore the previous context.
 
+The implementation of `_sigtramp` is in `libsystem_platform.dylib`
+on macOS:
 ```c
 void _sigtramp(union __sigaction_u __sigaction_u, int sigstyle, int sig,
                siginfo_t *sinfo, ucontext_t *uctx, uintptr_t token)
 {
         ...
+        /**
+         * Note the sa_sigaction is a macro which expands to
+         * __sigaction_u.__sa_sigaction. This is a function pointer to
+         * a user's signal handler of the type:
+         *  void (*__sa_sigaction)(int, siginfo_t *, void *)
+         */
         sa_sigaction(sig, sinfo, uctx);
         ...
         __sigreturn(uctx, ctxstyle, token);
@@ -509,22 +566,57 @@ void _sigtramp(union __sigaction_u __sigaction_u, int sigstyle, int sig,
 }
 ```
 
+What this information reveals is that `__sigreturn` on Darwin uses
+a `token` for validation. Presumably, `__sigreturn` will fail if the
+given `token` is not validated, and the user program will abort/trap.
+
+In practice, it was found that `__sigreturn` validation would fail during
+a restart. Rather than attempting to patch up the user context and token
+that are received by `__sigreturn`, a second `setcontext` is used to
+restore the user context that was executing before the signal handler
+was invoked. This achieves the same functionality as `__sigreturn`, but
+bypasses validation.
 
 ### 4.3 Reinstalling `ckpt_handler` on Restart
+Even after the `restart` program has restored all memory regions and
+called `setcontext` to restore a user context, there is still more
+work to be done. The `restart` program has the additional responsibility
+of restoring `ckpt_handler` such that additional `SIGUSR2`'s can be
+sent, allowing for several checkpoints and restarts. This provides the
+justification for why the `ucontext_t` saved to a checkpoint file will be
+a user context from within the signal handler. By allowing the `restart`
+program to jump back into `libckpt.dylib`, it is possible for the
+signal handler to be reinstalled during a restart.
+
+Alternatively, the `restart` program could have used `dlopen` on
+`libckpt.dylib` and `dlsym` on `ckpt_handler` to reinstall the signal
+handler from outside `libckpt.dylib`. However, this approach would be
+wasteful, as `libckpt.dylib` will already be present in `restart`'s
+address space once it has called `mach_vm_map` to restore memory regions
+from a checkpoint.
+
+Additionally, allowing the `restart` program to end up back inside
+`libckpt.dylib` after a `setcontext` provides other opportunities.
+In the current implementation of `libckpt.dylib`, there is a function,
+`postrestart`, which takes advantage of having the `restart` program 
+jump back inside `libckpt.dylib`. Concretely, `postrestart` will
+opportunistically deallocate the `restart` program's memory regions,
+reset a PAC-related value in `libsystem_pthread` (§5.5), reinstall
+`ckpt_handler`, and restore file descriptor state.
 
 ## 5. Pointer Authentication (PAC)
 This section will detail the implementation of PAC-aware, transparent
-checkpoint-restart. The approaches taken to handling PAC from the
+checkpoint-restart. The approaches taken for handling PAC from the
 perspective of a checkpoint library comprise the largest portion of this
-work. §5.1 and §5.2 are included as primers on PAC and provide context
-on the implications that PAC has on checkpoint-restart. Thereafter,
-the remaining sections will explain the implementation of PAC-aware
-checkpoint-restart in addition to discussing limitations.
+work. §5.1 and §5.2 are included as primers on PAC and provide the 
+context necessary to understanding how PAC impacts checkpoint-restart.
+Thereafter, the remaining sections will explain the implementation of 
+PAC-aware checkpoint-restart in addition to discussing limitations.
 
 ### 5.1 PAC Basics: Registers, Instructions, Bit Layout, Conventions
 PAC is a hardware security feature that introduced in ARMv8.3 and is
-available on Apple Silicon Devices. PAC is enabled by the arm64e ABI which
-will be discussed in more detail through this section.
+available on Apple Silicon Devices. PAC is enabled by the arm64e ABI and 
+will be discussed in more detail throughout this section.
 
 Four relevant PAC key registers are used:
 
@@ -535,29 +627,40 @@ Four relevant PAC key registers are used:
 | `APDAKey_EL1` |     Data    |    **No**   |
 | `APDBKey_EL1` |     Data    |   **Yes**   |
 
-`B` keys are process dependent keys, meaning that each process's `IB` and
-`DB` register is randomized. The `A` keys are process-independent, meaning
-that the `DA` and `IA` key registers are shared by every process on a
-system. `EL1` means that the PAC key system registers are only accessible
-by the kernel (whereas `EL0` is user level).
+A brief note on terminology: The names `IA`, `IB`, `DA`, and `DB` will
+be used to refer to `APIAKey_EL1`, `APIBKey_EL1`, `APDAKey_EL1`, and
+`APDBKey_EL1`, respectively. Furthermore, the term `A` keys will be
+used to refer to the `IA` and `DA` keys, and the term `B` keys will be
+used to refer to the `IB` and `DB` keys.
+
+`B` keys are process-dependent keys, meaning that each process's `IB` and
+`DB` keys are randomized. Accordingly, `A` keys are process-independent, 
+meaning that the `DA` and `IA` key registers are shared by every process.
+Additionally, notice that `I` corresponds to a PAC key used for
+instruction addresses, while `D` corresponds to data address signing.
+Lastly, note that `EL1` denotes a register that is only accessible to
+the kernel (whereas `EL0` would be user level). While certain `EL1`
+system registers are readable, but not writable from userspace, the
+PAC key registers are both not readable or writable at `EL0`.
 
 In order to implement pointer authentication, the arm64e ABI introduces
 `PAC` and `AUT` instructions. A `PAC` instruction will sign a pointer
 (instruction or data address) using one of the PAC key registers and
 an additional modifier. `AUT` instructions authenticate a signed pointer.
-If an `AUT` instruction is performed using the correct key and modifer,
-and the relevant pointer is not corrupt, the pointer's PAC signature
-will be stripped. On the other hand, an authentication failure (wrong
-key, modifier or pointer has been corrupted) will leave an invalid
-address in the pointer which will generate a fault if dereferenced.
+When an `AUT` instruction, using the correct key and modifier, 
+authenticates a valid PAC-signed pointer, the authenticated pointer will
+hold a valid address (data or instruction). On the other hand, an `AUT`
+instruction used to authenticate a corrupt pointer will leave an invalid
+address in the pointer. Thereafter, derefencing this pointer will generate
+an exception (such as a segfault or bus error).
 
-There are additional PAC instructions which extended existing arm64
-instructions with PAC-related functionality. For example, the `blraa`
-instruction corresponds to `blr`, but additionally authenticates the
-branch target destination using the `IA` key and a modifier. The `retab`
-instruction (in contrast to a normal `ret`) will authenticate the
-link register with the `IB` key and the stack pointer before returning
-from a subroutine.
+There are additional PAC instructions which extend existing arm64
+instructions with PAC-related functionality. For example, the `blraa` 
+instruction executes a normal `blr` (branch with link) after 
+authenticating the branch target with the `IA` key and a modifier.
+Another exampe is the `retab` instruction. In constrast to a normal `ret`,
+`retab` will authenticate the return address (in `x30`/`lr`) with the
+`IB` key and the stack pointer as a modifier.
 
 ```asm
 pacibsp
@@ -574,7 +677,7 @@ retab
 The above example demonstrates a standard function prologue and epilogue
 on arm64e. The link register is signed with the `IB` key and `sp` at
 function entry using the `pacibsp` instruction. Before the function 
-returns, the frame is popped of the stack, and the `retab` instruction 
+returns, the frame is popped of the stack. Then, a `retab` instruction 
 authenticates the link register with the `IB` key and `sp` as a modifier 
 before returning.
 
@@ -585,37 +688,49 @@ before returning.
 ```
 
 PAC signatures take advantage of the fact that the high bits of a pointer
-are typically unused. On a typical 64-bit system, a virtual address size
-won't actually be 64 bits, but rather somewhere around 48 bits. Assuming a
+are commonly unused. On a typical 64-bit system, a virtual address size
+will not be 64 bits, but rather somewhere around 48 bits. Given a
 48 bit virtual address size, bits 63:48 will be available for storing
-a PAC signature. However, bit 55 is left untouched by the PAC signature
-generated by a `PAC` instruction in order to differentiate between user
-and kernel addresses (0x000... vs 0xFFF...). When an `AUT` instructions
-fails, rather than generating an immediate trap, a specific bit pattern
-is set in the high bits of the pointer (`PTRAUTH_FAILED`). This pattern
-set in the high bits of a pointer will likely cause a segmentation fault
-or bus error if such a pointer is dereferenced.
+a PAC signature. However, bit 55 is an exception to this as it is used
+to differentiate between user and kernel address (`0x000..` vs `0xFFF..`).
+
+When an `AUT` instruction fails, it is possible than an immediate trap
+will not occur. Rather, a pattern may be set in the high bits of the
+pointer that will cause a segfault or bus error if the pointer is 
+dereferenced.
 
 In order to motivate the challenges that PAC presents for checkpointing,
-it is necessary to discuss exactly how it is used by real systems.
-The first key point to make is that, on macOS, all system libraries and
-binaries are compiled for the arm64e architecture. At the minimum,
-every return address with be protected with pointer authentication (using
-the `IB` + `sp` convention). `C` function pointers are signed with the
-`IA` key and a zero modifier. Function stubs (found in the 
-`__TEXT,__auth_stubs` section) are signed with the `IA` key and as a
-modifier, the GOT entry's storage address and possibly a constant 
-discriminator. Beyond the conventions observed in arm64e code (with 
-`-arch arm64e`), macOS system libraries can use the `__ptrauth` type 
-qualifier and other instrinsics defined in `ptrauth.h` (see 
-[llvm on ptrauth](https://clang.llvm.org/docs/PointerAuthentication.html#ptrauth-h)). The ways in which system libraries choose to use
-pointer authentication is present the most difficulty related to PAC for
-checkpoint-restart. Whereas clang's code generation uses deterministic
-and predictable PAC conventions, implentation-specific usage of `__ptrauth`
-qualifies types and signing schemes requires reverse engineering system
-libraries. Certain PAC failures were possible to be reverse enginereed
-(§5.5), but in general, libraries which implement PAC-signing schemes
-impose the greatest limitation on checkpoint-restart (see §5.6).
+it is necessary to discuss exactly how it is used in real systems.
+The first key point to make is that, on macOS, every system library or 
+binary will compiled for the arm64e architecture. 
+
+At the minimum, the standard PAC conventions used by the compiler will
+protect return address and branch targets. This implies that every
+return address will be protected by emitting a `pacibsp` before a
+function's prologue, and a `retab` instruction after the epilogue.
+Additionally, `C` function pointers will be signed with `paciza`
+instruction, and branched to with the `blraaz` instruction. For a
+complete guide how macOS compilers enforce pointer authentication, see
+[clang/llvm ptrauth](https://clang.llvm.org/docs/PointerAuthentication.html#non-triviality-from-address-diversity). Note that macOS ships with
+Apple's own fork of `clang`, but the standard for PAC enforced by Apple's
+clang reflects the implementation described in the LLVM's document.
+
+A more difficult issue for checkpoint-restart is encountered when system
+libraries use pointer authentication in their source code. This is
+trivially implemented by using the `__ptrauth` qualifier and other 
+instrinsics that are available in `<ptrauth.h>`. The difficulty imposed
+by libraries using PAC is that the standards and conventions that they
+use are completely flexible. Whereas Apple's `clang` uses deterministic
+and predictable PAC conventions, system library implementers can use
+pointer authentication however it may fit their needs. Thus, it is
+infeasible for a checkpoint-restart library to know exactly which 
+pointers a system library may sign, and where they might reside.
+
+In certain cases, source level pointer authentication usage in system 
+libraries was successfully reverse engineered (§5.5). Despite this,
+libraries using `__ptrauth` qualifiers and `ptrauth.h` intrinsics
+still impose one of the greatest limitations for checkpoint-restart on
+macOS. For more on limitations and considerations, see §6.
 
 ### 5.2 PAC Observations
 It is important to state certain subtleties about the functionality of
@@ -970,3 +1085,70 @@ new_ptr          = pac_strip_and_resign(old_ptr)
 
 slot_ptr[0]      = new_ptr ^ xor_cookie
 ```
+
+### 6. Limitations and Future Work
+
+# Appendix: macOS for Linux Users
+The following appendix is intended for Linux systems programmers as a brief 
+guide on macOS/Darwin concepts. This is not a comprehensive overview of macOS 
+and the Darwin kernel, but rather short reference on specific topics that
+are relevant to checkpoint-restart on macOS.
+
+## A.1 The Darwin Kernel: XNU, BSD, Mach
+The Darwin kernel has a hybrid architecture that combines the Mach
+microkernel with a BSD layer. A macOS process can use both BSD syscalls
+and Mach traps. The BSD syscall layer provides POSIX system calls such as
+`open`, `read`, `mmap`, `fork`, and others. Mach traps can be used for
+IPC, memory-management, and thread operations.
+
+## A.2 dyld and the dyld shared cache 
+`ld.so` on Linux resolves individual shared objects (`.so`'s) independently.
+On macOS, **dyld** does the same for user libraries, but system libraries
+are bundled into a file called the dyld shared cache. When a system boots,
+the shared cache file is mapped at a fixed virtual address and shared
+between all processes. Executable code is physically-shared between all
+processes, while writable segments contain Copy-on-Write pages that are
+faulted in when written to.
+
+## A.3 macOS Binary Format: Mach-O
+macOS's binary format is Mach-O.
+
+- **Mach-O Segments** - A segment is a contiguous range of virtual 
+  addresses. Examples include `__TEXT`, `__DATA`, `__LINKEDIT`, and
+  `__PAGEZERO`. A section is a fine-grained subset of one segment.
+  Examples of section are the following: `__TEXT,__text`, `__DATA,__bss`,
+  and `__DATA,__interpose`.
+- **`__DATA,__interpose`** - a particularly important section in the
+  context of checkpoint-restart. This section contains entries that are
+  pairs of `(replacement, original)`. Each entry instructs `dyld` to 
+  re-bind calls to `original` to go to `replacement`. This section allows
+  one to interpose function calls without needing `LD_PRELOAD`, and
+  without neeeding `dlsym` with `RTLD_NEXT` to find the real function
+  definition.
+
+## A.4 Loaders and Shared Objects
+| Linux | macOS |
+|---|---|
+| `ld-linux.so` | `dyld` |
+| `LD_PRELOAD` | `DYLD_INSERT_LIBRARIES` |
+| `.so` | `.dylib` |
+
+As with `LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` will allow a
+shared object to be loaded before a program's `main` executes. On Linux,
+this is useful because it allows interposers to override functions in
+other libraries (such a `libc.so`). On macOS, preloading a library is not a
+requirement for function interposition (see §A.3). However,
+`DLYD_INSERT_LIBRARIES` is still used for macOS checkpoint-restart in order
+to allow `libckpt.dylib` to install its signal handler in a constructor
+function (`__attribute__((constructor))`).
+
+## A.5 macOS and Linux Checkpoint-Restart Cheat Sheet
+| Concept | Linux | macOS |
+|---|---|---|
+| Saving Memory Segments | `/proc/self/maps` | `mach_vm_region_recurse` |
+| Library Injection | `LD_PRELOAD` | `DYLD_INSERT_LIBRARIES` |
+| Interposing | `LD_PRELOAD` + Override symbol + `dlsym(RTLD_NEXT)` | `__DATA,__interpose` section |
+| Linker | `ld.so` | `dyld` |
+| Binary Format | ELF | Mach-O |
+| Disable ASLR | `personality(ADDR_NO_RANDOMIZE)` | `POSIX_SPAWN_DISABLE_ASLR` |
+| Map at Fixed Address | `mmap` + `MAP_FIXED` | `mach_vm_map` + `VM_FLAGS_FIXED` + `VM_FLAGS_OVERWRITE` |
