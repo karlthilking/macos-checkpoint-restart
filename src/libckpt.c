@@ -19,17 +19,23 @@ extern uintptr_t __stack_chk_guard;
 
 void precheckpoint(void)
 {
-        save_file_offsets();
+#if defined(__arm64e__)
+        __pthread_cookie();
+#endif
+        if (save_file_states() < 0)
+                fprintf(stderr, "Failed save file/fd state\n");
 }
 
 void postrestart(void)
 {
         ckpt_vm_deallocate_regions();
-        pthread_fixup();
+#if defined(__arm64e__)
+        __pthread_slot_fixup();
+#endif
         setup();
-        reopen_files();
+        if (reopen_files() < 0)
+                fprintf(stderr, "Failed to restore file/fd state\n");
 }
-
 
 void ckpt_handler(int sig, siginfo_t *info, void *uctx)
 {
@@ -40,8 +46,8 @@ void ckpt_handler(int sig, siginfo_t *info, void *uctx)
         static int              restart;
         static uintptr_t        tls;
 
-        
         bzero(&meta, sizeof(meta));
+        precheckpoint();
         restart = 0;
         if (getcontext(&ctx) < 0)
                 err(EXIT_FAILURE, "getcontext");
@@ -114,8 +120,6 @@ void setup()
         sa.sa_flags     = SA_SIGINFO | SA_RESTART;
         sa.sa_sigaction = ckpt_handler;
         sigaction(SIGUSR2, &sa, NULL);
-
-        pthread_init();
 }
 
 __attribute__((destructor))
