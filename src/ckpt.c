@@ -8,34 +8,56 @@
 #include <spawn.h>
 #include <dlfcn.h>
 #include <assert.h>
+#include <mach-o/dyld.h>
+#include <sys/param.h>
+#include "types.h"
 
 #ifndef POSIX_SPAWN_DISABLE_ASLR
-#define POSIX_SPAWN_DISABLE_ASLR 0x0100
+# define POSIX_SPAWN_DISABLE_ASLR 0x0100
 #endif
 
-__attribute__((noreturn))
+void getpath(const char *file, char *out)
+{
+        char    buf[PATH_MAX], path[PATH_MAX];
+        u32     bufsize = PATH_MAX;
+        
+        if (_NSGetExecutablePath(buf, &bufsize) < 0)
+                err(EXIT_FAILURE, "_NSGetExecutablePath");
+        else if (realpath(buf, path) == NULL)
+                err(EXIT_FAILURE, "realpath(%s, ...)", buf);
+
+        strncpy(out, path, strlen(path) + 1);
+        strncpy(strstr(strstr(out, "macos"), "ckpt"),
+                file, strlen(file) + 1);
+}
+
 void print(char *ckptfile)
 {
-        if (execl("./printckpt", "./printckpt", ckptfile, NULL) < 0)
-                perror("execl");
+        char *argv[3], printckpt_path[PATH_MAX];
 
-        exit(EXIT_FAILURE);
-}
-
-__attribute__((noreturn))
-void checkpoint(char **args)
-{
-        if (setenv("DYLD_INSERT_LIBRARIES", "./libckpt.dylib", 1) < 0)
-                err(EXIT_FAILURE, "setenv");
-
-        printf("Executing %s (pid=%d)\n", args[0], getpid());
-        if (execvp(args[0], args) < 0)
-                perror("execvp");
+        getpath("printckpt", printckpt_path);
         
-        exit(EXIT_FAILURE);
+        argv[0] = printckpt_path;
+        argv[1] = ckptfile;
+        argv[2] = NULL;
+
+        if (execvp(argv[0], argv) < 0)
+                err(EXIT_FAILURE, "execvp(%s, ...)", argv[0]);
 }
 
-__attribute__((noreturn)) 
+void checkpoint(char **argv)
+{
+        char libckpt_path[PATH_MAX];
+
+        getpath("libckpt.dylib", libckpt_path);
+        printf("Executing %s (pid=%d)\n", argv[0], getpid());
+
+        if (setenv("DYLD_INSERT_LIBRARIES", libckpt_path, 1) < 0)
+                err(EXIT_FAILURE, "setenv");
+        else if (execvp(argv[0], argv) < 0)
+                err(EXIT_FAILURE, "execvp");
+}
+
 void restart(char *ckptfile)
 {
         int                     retval;
@@ -43,26 +65,29 @@ void restart(char *ckptfile)
         pid_t                   pid;
         extern char             **environ;
         posix_spawnattr_t       attr;
+        char                    restart_path[PATH_MAX], *argv[3];
 
+        getpath("restart", restart_path);
         posix_spawnattr_init(&attr);
-        char *args[] = {"./restart", ckptfile, NULL};
+
+        argv[0] = restart_path;
+        argv[1] = ckptfile;
+        argv[2] = NULL;
 
         /**
          * Disable address space layout randomization so fixed 
          * restart text and data segments are not slid
          */
         flags = POSIX_SPAWN_DISABLE_ASLR | POSIX_SPAWN_SETEXEC;
-        
         if (posix_spawnattr_setflags(&attr, flags) < 0)
                 err(EXIT_FAILURE, "posix_spawnattr_setflags");
         
-        retval = posix_spawn(&pid, "./restart", NULL,
-                             &attr, args, environ);
-        if (retval < 0)
-                perror("posix_spawn");
-
-        posix_spawnattr_destroy(&attr);
-        exit(EXIT_FAILURE);
+        retval = posix_spawn(&pid, restart_path, NULL,
+                             &attr, argv, environ);
+        if (retval < 0) {
+                posix_spawnattr_destroy(&attr);
+                err(EXIT_FAILURE, "posix_spawn");
+        }
 }
 
 __attribute__((noreturn))
