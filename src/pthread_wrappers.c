@@ -2,6 +2,9 @@
 #define _XOPEN_SOURCE
 #include <stdio.h>
 #include <assert.h>
+#include <time.h>
+#include <errno.h>
+#include "time_wrappers.h"
 #include "pthread_wrappers.h"
 #include "thread_info.h"
 #include "types.h"
@@ -9,29 +12,61 @@
 
 static uintptr_t pthread_xor_cookie;
 
-void __pthread_create_hook(pthread_t *thread, const pthread_attr_t *attr,
+int __pthread_create_hook(pthread_t *thread, const pthread_attr_t *attr,
                            void *(*start_routine)(void *), void *arg)
 {
-        int             retval;
-        thread_info_t   *self, *new;
-        
-        self = thread_list_self();
-        new = thread_init(start_routine, arg);
-        assert(new != NULL);
+        int                     retval;
+        struct thread_info      *new, *self;
+         
+        self    = thread_self();
+        new     = thread_init(start_routine, arg);
 
-        assert(thread_state_cas(self, ST_RUNNING, ST_THREAD_CREATE));
-        retval = pthread_create(thread, attr, start_routine, arg);
-        assert(thread_state_cas(self, ST_THREAD_CREATE, ST_RUNNING));
-
-        if (retval != 0)
-                thread_destroy(new);
+        thread_state_cas(self, ST_RUNNING, ST_THREAD_CREATE);
+        retval = pthread_create(thread, attr, thread_start, new);
+        thread_state_cas(self, ST_THREAD_CREATE, ST_RUNNING);
 
         return retval;
 }
 
+/**
+ * __pthread_join_hook:
+ *  Poll thread with pthread_cond_timedwait to prevent having a user
+ *  thread block in pthread_join. If a checkpoint is sent while a user
+ *  thread is blocked in pthread join, the pthread_t descriptor will
+ *  be stale upon restart.
+ */
+int __pthread_join_hook(pthread_t thread, void **value_ptr)
+{
+        int                     err;
+        struct timespec         ts;
+        struct thread_info      *th;
+
+        if ((th = thread_list_find(thread)) == NULL) {
+                if ((err = pthread_kill(thread, 0)) == ESRCH)
+                        return err;
+                return pthread_join(thread, value_ptr);
+        }
+        
+        pthread_mutex_lock(&th->lock);
+        do {
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_nsec += 100 * NSEC_PER_MSEC;
+                if (ts.tv_nsec >= NSEC_PER_SEC) {
+                        ts.tv_nsec -= NSEC_PER_SEC;
+                        ts.tv_sec += 1;
+                }
+
+                err = pthread_cond_timedwait(&th->cond, &th->lock, &ts);
+        } while (err == ETIMEDOUT);
+        pthread_mutex_unlock(&th->lock);
+
+        return pthread_join(th->self, value_ptr);
+}
+
 void __pthread_exit_hook(void *value_ptr)
 {
-
+        thread_exit();
+        pthread_exit(value_ptr);
 }
 
 void __pthread_cookie()

@@ -2,14 +2,12 @@
 #ifndef __CKPT_THREAD_INFO_H__
 #define __CKPT_THREAD_INFO_H__
 #define _XOPEN_SOURCE
+#include <stdatomic.h>
 #include <ucontext.h>
 #include <pthread.h>
+#include <signal.h>
 
-typedef enum __thread_state     thread_state;
-typedef struct thread_info_s    thread_info_t;
-typedef struct thread_list_s    thread_list_t;
-
-enum __thread_state {
+typedef enum thread_state {
         ST_NULL,
         ST_RUNNING,
         ST_SIGNALED,
@@ -17,14 +15,14 @@ enum __thread_state {
         ST_SUSPENDED,
         ST_CKPT_THREAD,
         ST_THREAD_CREATE,
+} thread_state;
+
+struct thread_list {
+       struct thread_info       *head;
+       pthread_mutex_t          lock;
 };
 
-struct thread_list_s {
-       thread_info_t    *head;
-       pthread_mutex_t  lock;
-};
-
-struct thread_info_s {
+struct thread_info {
         pthread_t               self;
         void                    *(*fn)(void *);
         void                    *arg;
@@ -38,11 +36,11 @@ struct thread_info_s {
         pthread_mutex_t         lock;
         pthread_cond_t          cond;
 
-        thread_info_t           *next;
-        thread_info_t           *prev;
+        struct thread_info      *next;
+        struct thread_info      *prev;
 };
 
-static inline int thread_state_cas(thread_info_t *th,
+static inline int thread_state_cas(struct thread_info *th,
                                    thread_state expected, 
                                    thread_state desired)
 {
@@ -56,14 +54,15 @@ void thread_list_init(void);
 __attribute__((destructor))
 void thread_list_destroy(void);
 
-thread_info_t   *thread_list_self(void);
-void            thread_list_acquire(void);
-void            thread_list_release(void);
-void            thread_list_add(thread_info_t *);
-void            thread_list_remove(thread_info_t *);
+void                    thread_list_acquire(void);
+void                    thread_list_release(void);
+struct thread_info      *thread_list_find(pthread_t);
+void                    thread_list_add(void);
 
-thread_info_t   *thread_init(void *(*)(void *), void *);
-void            thread_destroy(thread_info_t *);
+struct thread_info      *thread_init(void *(*)(void *), void *);
+void                    thread_reap(struct thread_info *);
+void                    thread_exit(void);
+struct thread_info      *thread_self(void);
 
 void    ckpt_thread_wait(void);
 void    *ckpt_thread_work(void *);
@@ -74,14 +73,15 @@ void    resume_threads(void);
 void    restore_threads(void);
 void    wait_for_exiting_threads(void);
 
-void    thread_arrival_barrier(void);
-void    thread_release_barrier(void);
-
+void    thread_barrier(void);
 void    thread_sighandler(int, siginfo_t *, void *);
 void    *thread_start(void *);
 void    *thread_restart(void *);
 
-void    thread_save_tls(thread_info_t *);
-void    thread_save_context(thread_info_t *, ucontext_t *);
+void    thread_save_tls(void);
+void    thread_save_context(ucontext_t *);
+void    thread_restore_context(void);
+void    thread_save_sig_state(void);
+void    thread_restore_sig_state(void);
 
 #endif // __CKPT_THREAD_INFO_H__
